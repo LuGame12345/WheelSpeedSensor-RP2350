@@ -15,7 +15,9 @@ void WheelSpeedSensor::_initSM(uint sm, uint8_t pin) {
     sm_config_set_in_pins(&cfg, pin);
     sm_config_set_clkdiv(&cfg, 1.0f);  // 125 MHz; Flanken-Mindestbreite ~16 ns
 
-    gpio_pull_up(pin);                 // Pull-up für Lichtschranken-Ausgang
+    pio_gpio_init(_pio, pin);                                // GPIO-Funktion → PIO0/1
+    pio_sm_set_consecutive_pindirs(_pio, sm, pin, 1, false); // Richtung: Eingang
+    gpio_pull_up(pin);                                       // Pull-up aktivieren
     pio_sm_init(_pio, sm, _pioOffset, &cfg);
     pio_sm_set_enabled(_pio, sm, true);
 }
