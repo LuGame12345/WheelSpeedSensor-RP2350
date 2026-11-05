@@ -5,6 +5,7 @@
 #include "UltrasonicSensor.h"
 #include "LineSensor.h"
 #include "BleUart.h"
+#include "LineFollower.h"
 
 // Lichtschranken: Pin Links = 21, Pin Rechts = 20, Raddurchmesser = 65 mm, Aussparungen = 20
 WheelSpeedSensor speedSensors(21, 20, 65.0, 20);
@@ -29,6 +30,9 @@ LineSensor lineSensor(7, 8, 9);
 BleUart ble;
 static constexpr const char *BLE_NAME = "Auto-Roboter";
 
+// Autonome Linienfolge (Taste 'l')
+LineFollower lineFollower(lineSensor, drive, speedSensors);
+
 int testSpeed = 50;                              // % für die Tastatursteuerung (+/- ändert)
 static constexpr float SLOW_DISTANCE_M = 0.10f;  // ab hier langsamer fahren
 static constexpr float STOP_DISTANCE_M = 0.05f;  // ab hier sofort stoppen
@@ -48,12 +52,16 @@ void out(const String &text) {
 void printSettings() {
     out("Tempo: " + String(testSpeed) + " % | Kurs: " + String(drive.getBias() * 100.0f, 1) +
         " % | Kp: " + String(drive.getKp(), 2) + " | Ki: " + String(drive.getKi(), 2) + "\n");
+    out("Linie: Basis " + String(lineFollower.baseSpeed, 0) + " % | Lenk-Kp " + String(lineFollower.kp, 2) +
+        " | Kd " + String(lineFollower.kd, 2) + " | Lücke max " + String(lineFollower.gapMaxMm, 0) +
+        " mm | Suche max " + String(lineFollower.searchMaxMm, 0) + " mm\n");
 }
 
 void printHelp() {
     out("Initialisiert. Steuerung (gedrückt halten): w=vor, s=zurück, a=links, d=rechts, x=stopp, b=bremsen\n");
     out("Regelung: r=Trim zurücksetzen, n=Regelung an/aus, h=Hilfe\n");
     out("Einstellen: +/- Tempo, ,/. Kurs links/rechts, p/P Kp, i/I Ki, g=Werte anzeigen\n");
+    out("Linienfolge: l=start/stopp, k/K Lenk-Kp, m/M Kd, +/- Basistempo (während Linienfolge)\n");
 }
 
 void setup() {
@@ -96,6 +104,7 @@ void holdKey(char key, bool fromPad = false) {
     if (key == activeKey) {
         repeating = true;                 // Wiederholung → weiterfahren
     } else {
+        if (lineFollower.isActive()) lineFollower.stop();   // manuelle Übernahme
         activeKey = key;
         repeating = false;
         applyMove(key);
@@ -107,6 +116,7 @@ void holdKey(char key, bool fromPad = false) {
 void releaseKey() {
     activeKey = 0;
     padHeld   = false;
+    if (lineFollower.isActive()) lineFollower.stop();
     drive.stop();
 }
 
@@ -164,9 +174,33 @@ void handleCommand(char c) {
             break;
         case 'h': printHelp(); break;
 
+        // --- Linienfolge ---
+        case 'l':
+            if (lineFollower.isActive()) {
+                lineFollower.stop();
+                out("Linienfolge AUS\n");
+            } else {
+                activeKey = 0;
+                padHeld   = false;
+                lineFollower.start();
+                out("Linienfolge AN\n");
+            }
+            break;
+        case 'k': lineFollower.kp = max(lineFollower.kp - 0.1f, 0.0f);  printSettings(); break;
+        case 'K': lineFollower.kp += 0.1f;                               printSettings(); break;
+        case 'm': lineFollower.kd = max(lineFollower.kd - 0.05f, 0.0f); printSettings(); break;
+        case 'M': lineFollower.kd += 0.05f;                              printSettings(); break;
+
         // --- Einstellen fürs Geradeausfahren (wirkt sofort, auch während der Fahrt) ---
-        case '+': testSpeed = min(testSpeed + 10, 100); out("Tempo: " + String(testSpeed) + " %\n"); break;
-        case '-': testSpeed = max(testSpeed - 10, 10);  out("Tempo: " + String(testSpeed) + " %\n"); break;
+        // +/- : während der Linienfolge deren Basistempo, sonst das Tastentempo
+        case '+':
+            if (lineFollower.isActive()) { lineFollower.baseSpeed = min(lineFollower.baseSpeed + 10.0f, 100.0f); printSettings(); }
+            else { testSpeed = min(testSpeed + 10, 100); out("Tempo: " + String(testSpeed) + " %\n"); }
+            break;
+        case '-':
+            if (lineFollower.isActive()) { lineFollower.baseSpeed = max(lineFollower.baseSpeed - 10.0f, 10.0f); printSettings(); }
+            else { testSpeed = max(testSpeed - 10, 10); out("Tempo: " + String(testSpeed) + " %\n"); }
+            break;
         // Kurs-Trim: zieht er nach links → '.' (mehr nach rechts), zieht er nach rechts → ','
         case ',': drive.setBias(drive.getBias() - 0.005f); printSettings(); break;
         case '.': drive.setBias(drive.getBias() + 0.005f); printSettings(); break;
@@ -225,21 +259,37 @@ float obstacleDistance() {
 // Wird in jedem loop() geprüft, damit auch ein neuer 'w'-Befehl sofort abgefangen wird.
 // Rückwärts und Drehen bleiben immer erlaubt (und ungedrosselt), damit man wegkommt.
 void handleObstacle() {
+    static bool blocked = false;   // steht gerade wegen eines Hindernisses
     float d = obstacleDistance();
 
-    if (!drive.isMovingForward()) {
+    // Vorwärts gewollt? Manuell (Sollwert) oder Linienfolge (FOLGEN/LUECKE, auch wenn gerade gebremst)
+    bool forward = drive.isMovingForward() || lineFollower.wantsForward();
+    if (!forward) {
         drive.setSpeedScale(1.0f);
+        blocked = false;
+        lineFollower.setPaused(false);
         return;
     }
 
     // Früher bremsen, je schneller er fährt, damit er etwa bei STOP_DISTANCE_M steht
     float brakeDistance = STOP_DISTANCE_M + currentSpeedMs * REACTION_TIME_S;
 
-    if (d < brakeDistance) {
+    // Einmal gestoppt: erst weiter, wenn der Weg wieder über SLOW_DISTANCE_M frei ist
+    // (sonst kriecht er in Ruckeln an das Hindernis heran)
+    if (d < brakeDistance || (blocked && d < SLOW_DISTANCE_M)) {
         drive.brake();
-        out("STOPP: Hindernis bei " + String(d, 3) + " m (Bremspunkt " +
-            String(brakeDistance, 3) + " m bei " + String(currentSpeedMs, 2) + " m/s)\n");
+        lineFollower.setPaused(true);
+        if (!blocked) {
+            out("STOPP: Hindernis bei " + String(d, 3) + " m (Bremspunkt " +
+                String(brakeDistance, 3) + " m bei " + String(currentSpeedMs, 2) + " m/s)\n");
+        }
+        blocked = true;
         return;
+    }
+    if (blocked) {
+        blocked = false;
+        lineFollower.setPaused(false);
+        if (lineFollower.isActive()) out("Weg frei → Linienfolge geht weiter\n");
     }
 
     if (d < SLOW_DISTANCE_M) {
@@ -252,10 +302,25 @@ void handleObstacle() {
     }
 }
 
+// Zustandswechsel der Linienfolge melden
+void reportLineState() {
+    static LineFollower::State last = LineFollower::State::Idle;
+    LineFollower::State now = lineFollower.getState();
+    if (now == last) return;
+    if (now == LineFollower::State::Stopped) {
+        out("Linie verloren → STOPP (nach " + String(lineFollower.searchMaxMm, 0) + " mm Suche)\n");
+    } else if (now != LineFollower::State::Idle) {
+        out(String("Linienfolge: ") + lineFollower.getStateName() + "\n");
+    }
+    last = now;
+}
+
 void loop() {
     handleCommands();
     sonar.update();
     handleObstacle();
+    lineFollower.update();
+    reportLineState();
     drive.update();
 
     WheelSpeedSensor::SpeedData data;
@@ -266,7 +331,18 @@ void loop() {
 
         // Linie: L/M/R, '#' = schwarze Linie, '.' = keine Linie
         LineSensor::Reading line = lineSensor.read();
-        String msg = "Linie: ";
+        String msg = "Modus: ";
+        if (lineFollower.getState() != LineFollower::State::Idle) {
+            msg += String("Linie/") + lineFollower.getStateName();
+            if (lineFollower.isPaused()) msg += "(Hindernis)";
+            if (lineFollower.getState() == LineFollower::State::Gap ||
+                lineFollower.getState() == LineFollower::State::Search) {
+                msg += " " + String(lineFollower.getStateDistanceMm(), 0) + " mm";
+            }
+        } else {
+            msg += activeKey ? "manuell" : "steht";
+        }
+        msg += " | Linie: ";
         msg += line.left   ? '#' : '.';
         msg += line.center ? '#' : '.';
         msg += line.right  ? '#' : '.';

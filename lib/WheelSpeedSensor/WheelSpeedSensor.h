@@ -26,6 +26,9 @@ public:
     // solange nur Differenzen gebildet werden)
     void getPulseCounts(uint32_t &left, uint32_t &right) const;
 
+    // Strecke pro Puls in Metern (Radumfang / Aussparungen, hier ≈ 0,0102 m)
+    float getMetersPerPulse() const { return _metersPerPulse; }
+
     // Entprellung: Pulse, die schneller als minUs nach dem vorherigen kommen,
     // werden als Störung verworfen. 2000 µs reichen bis ~1 m/s (≈100 Pulse/s).
     void setDebounceUs(uint32_t minUs) { _debounceUs = minUs; }
