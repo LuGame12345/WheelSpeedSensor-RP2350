@@ -20,7 +20,7 @@ pio run --target upload && pio device monitor
 
 ## Zielplatform
 
-- **Board:** Seeed Studio XIAO RP2350 (`seeed_xiao_rp2350`)
+- **Board:** Seeed Studio XIAO RP2350 (`seeed_xiao_rp2350`) als Basis, aber per `board_build.variant = rpipico2w` + CYW43-Flags in `platformio.ini` auf den Pico 2 W umgebogen (nötig für BLE). Die Seeed-Platform akzeptiert nur ihre eigenen Board-Namen, daher keine eigene Board-JSON möglich. `-DPIO_FRAMEWORK_ARDUINO_ENABLE_BLUETOOTH` schaltet BTstack ein.
   - Physisch ist es ein Raspberry Pi Pico 2 W (siehe `Schaltungsdokumentation_auto.pdf`), es meldet sich per USB aber als XIAO RP2350. Die Konfiguration `rpipico2w` funktioniert nicht – XIAO-Konfiguration beibehalten. Pin-Nummern im Code sind GPIO-Nummern.
 - **Chip:** RP2350 (Cortex-M33, 150 MHz), 2 MB Flash
 - **Framework:** Arduino via `framework-arduinopico`
@@ -97,8 +97,17 @@ LineSensor(uint8_t pinLeft, uint8_t pinCenter, uint8_t pinRight, uint8_t lineLev
 - `getPosition(pos)` → -1.0 (links) .. 0.0 (Mitte) .. +1.0 (rechts); `false`, wenn keine Linie erkannt
 - `readBits()` → Bitmuster L/M/R, z. B. `0b010` = mittig
 
+### BleUart-Bibliothek (`lib/BleUart/`)
+
+BLE-„Seriell“ über den Nordic UART Service (NUS) direkt mit BTstack (`att_db_util`, `att_server`). Ist ein `Stream` → `print()`/`read()` wie bei `Serial`. Singleton (BTstack-Callbacks global).
+
+- Service `6E400001-…`, RX (write) `6E400002-…`, TX (notify) `6E400003-…`; Gerätename `Auto-Roboter`.
+- Empfang: Write-Callback (Bluetooth-Kontext) → RX-Ringpuffer → `read()` in `loop()`.
+- Senden: `write()` legt unter `__lockBluetooth()` in den TX-Ringpuffer und fordert `ATT_EVENT_CAN_SEND_NOW` an; dort wird in MTU-großen Stücken per `att_server_notify` verschickt. Ohne Verbindung/aktiviertes Notify wird verworfen (blockiert nie).
+- Gedacht für Apps wie „Serial Bluetooth Terminal“ (Android) bzw. „Bluefruit Connect“/„nRF Connect“ (iOS).
+
 ### `src/main.cpp`
 
-Standard Arduino-Sketch: `setup()` initialisiert Serial (115200), `motors.begin()` und `speedSensors.begin()`. `loop()` wertet Tastaturbefehle über Serial aus (w/s/a/d = fahren, x = stopp, b = bremsen, r = Trim zurücksetzen, n = Regelung an/aus), ruft `sonar.update()`, `handleObstacle()` und `drive.update()` auf und gibt alle 200 ms Liniensensor (`#` = Linie, `.` = keine), Hindernisabstand (m), PWM, Pulsfehler, Trim und Geschwindigkeiten aus.
+Standard Arduino-Sketch: `setup()` initialisiert Serial (115200), alle Sensoren/Motoren und `ble.begin()`. `loop()` wertet Befehle über Serial **und BLE** aus (`handleCommand()`: w/s/a/d = fahren, x = stopp, b = bremsen, r = Trim zurücksetzen, n = Regelung an/aus, h = Hilfe), ruft `sonar.update()`, `handleObstacle()` und `drive.update()` auf und gibt alle 200 ms Liniensensor (`#` = Linie, `.` = keine), Hindernisabstand (m), PWM, Pulsfehler, Trim und Geschwindigkeiten aus. Alle Ausgaben laufen über `out()` an USB und BLE. Trennt sich das Handy, werden die Motoren gestoppt.
 
 Hinderniserkennung (`handleObstacle()`), nur bei Vorwärtsfahrt: zwischen 10 cm und dem Bremspunkt stufenlos gedrosselt (`setSpeedScale` 0.5 → 0.2), am Bremspunkt `drive.brake()`. Bremspunkt = `STOP_DISTANCE_M` (5 cm) + Geschwindigkeit × `REACTION_TIME_S` (0,15 s), damit er etwa bei 5 cm steht; Geschwindigkeit = Mittel beider Lichtschranken (alle 200 ms). Rückwärts und Drehen bleiben immer erlaubt und ungedrosselt. **Wichtig:** Der HC-SR04 liefert unter ~3 cm kein gültiges Echo – `obstacleDistance()` wertet ein fehlendes Echo nach einem nahen Messwert (< 10 cm) deshalb als 0 m statt als „frei“. Stoppgrenze nicht unter ~4 cm setzen.

@@ -4,6 +4,7 @@
 #include "DriveController.h"
 #include "UltrasonicSensor.h"
 #include "LineSensor.h"
+#include "BleUart.h"
 
 // Lichtschranken: Pin Links = 21, Pin Rechts = 20, Raddurchmesser = 65 mm, Aussparungen = 20
 WheelSpeedSensor speedSensors(21, 20, 65.0, 20);
@@ -24,6 +25,10 @@ UltrasonicSensor sonar(18, 19);
 // Spurfolgesensor: links = GPIO7, Mitte = GPIO8, rechts = GPIO9 (LOW = schwarze Linie)
 LineSensor lineSensor(7, 8, 9);
 
+// BLE-„Seriell“ (Nordic UART Service): gleiche Befehle und Ausgaben wie über USB
+BleUart ble;
+static constexpr const char *BLE_NAME = "Auto-Roboter";
+
 static constexpr int   TEST_SPEED      = 50;     // % für die Tastatursteuerung
 static constexpr float SLOW_DISTANCE_M = 0.10f;  // ab hier langsamer fahren
 static constexpr float STOP_DISTANCE_M = 0.05f;  // ab hier sofort stoppen
@@ -34,6 +39,17 @@ static constexpr float REACTION_TIME_S = 0.15f;  // Bremsweg ≈ Geschwindigkeit
 static constexpr float SLOW_FACTOR_MAX = 0.5f;   // Geschwindigkeit bei SLOW_DISTANCE_M
 static constexpr float SLOW_FACTOR_MIN = 0.2f;   // Geschwindigkeit kurz vor STOP_DISTANCE_M
 
+// Text gleichzeitig an USB-Seriell und BLE schicken
+void out(const String &text) {
+    Serial.print(text);
+    ble.print(text);
+}
+
+void printHelp() {
+    out("Initialisiert. Steuerung: w=vor, s=zurück, a=links, d=rechts, x=stopp, b=bremsen\n");
+    out("Regelung: r=Trim zurücksetzen, n=Regelung an/aus, h=Hilfe\n");
+}
+
 void setup() {
     Serial.begin(115200);
     while (!Serial && millis() < 3000); // Warten auf Seriellen Monitor (Timeout 3s)
@@ -43,28 +59,55 @@ void setup() {
     speedSensors.begin();
     sonar.begin();
     lineSensor.begin();
-    Serial.println("Initialisiert. Steuerung: w=vor, s=zurück, a=links, d=rechts, x=stopp, b=bremsen");
-    Serial.println("Regelung: r=Trim zurücksetzen, n=Regelung an/aus");
+    ble.begin(BLE_NAME);
+    printHelp();
 }
 
-void handleSerialCommands() {
+// Einen Steuerbefehl ausführen – egal ob er per USB oder BLE kam
+void handleCommand(char c) {
     static bool syncOn = true;
-    while (Serial.available()) {
-        switch (Serial.read()) {
-            case 'w': drive.drive( TEST_SPEED,  TEST_SPEED); break;
-            case 's': drive.drive(-TEST_SPEED, -TEST_SPEED); break;
-            case 'a': drive.drive(-TEST_SPEED,  TEST_SPEED); break;
-            case 'd': drive.drive( TEST_SPEED, -TEST_SPEED); break;
-            case 'x': drive.stop();  break;
-            case 'b': drive.brake(); break;
-            case 'r': drive.resetTrim(); Serial.println("Trim zurückgesetzt"); break;
-            case 'n':
-                syncOn = !syncOn;
-                drive.setSyncEnabled(syncOn);
-                Serial.println(syncOn ? "Regelung AN" : "Regelung AUS");
-                break;
-        }
+    switch (c) {
+        case 'w': drive.drive( TEST_SPEED,  TEST_SPEED); break;
+        case 's': drive.drive(-TEST_SPEED, -TEST_SPEED); break;
+        case 'a': drive.drive(-TEST_SPEED,  TEST_SPEED); break;
+        case 'd': drive.drive( TEST_SPEED, -TEST_SPEED); break;
+        case 'x': drive.stop();  break;
+        case 'b': drive.brake(); break;
+        case 'r': drive.resetTrim(); out("Trim zurückgesetzt\n"); break;
+        case 'n':
+            syncOn = !syncOn;
+            drive.setSyncEnabled(syncOn);
+            out(syncOn ? "Regelung AN\n" : "Regelung AUS\n");
+            break;
+        case 'h': printHelp(); break;
+        // Zeilenenden und Unbekanntes ignorieren (Apps senden oft "w\r\n")
     }
+}
+
+void handleCommands() {
+    while (Serial.available()) handleCommand(Serial.read());
+    while (ble.available())    handleCommand(ble.read());
+
+    // Einmalig melden, sobald Bluetooth läuft (bzw. nach 5 s, falls nicht)
+    static bool readyReported = false;
+    if (!readyReported && ble.isReady()) {
+        Serial.println("BLE bereit: sichtbar als \"" + String(BLE_NAME) + "\" (" + ble.address() + ")");
+        readyReported = true;
+    } else if (!readyReported && millis() > 5000) {
+        Serial.println("FEHLER: Bluetooth ist nach 5 s nicht gestartet");
+        readyReported = true;
+    }
+
+    // Sicherheit: Verbindung zum Handy weg → anhalten
+    static bool wasConnected = false;
+    bool connected = ble.isConnected();
+    if (connected && !wasConnected) {
+        Serial.println("BLE verbunden");
+    } else if (!connected && wasConnected) {
+        drive.stop();
+        Serial.println("BLE getrennt → Motoren gestoppt");
+    }
+    wasConnected = connected;
 }
 
 // Aktuelle Fahrgeschwindigkeit (Mittel beider Räder), alle 200 ms von den Lichtschranken
@@ -98,13 +141,8 @@ void handleObstacle() {
 
     if (d < brakeDistance) {
         drive.brake();
-        Serial.print("STOPP: Hindernis bei ");
-        Serial.print(d, 3);
-        Serial.print(" m (Bremspunkt ");
-        Serial.print(brakeDistance, 3);
-        Serial.print(" m bei ");
-        Serial.print(currentSpeedMs, 2);
-        Serial.println(" m/s)");
+        out("STOPP: Hindernis bei " + String(d, 3) + " m (Bremspunkt " +
+            String(brakeDistance, 3) + " m bei " + String(currentSpeedMs, 2) + " m/s)\n");
         return;
     }
 
@@ -119,7 +157,7 @@ void handleObstacle() {
 }
 
 void loop() {
-    handleSerialCommands();
+    handleCommands();
     sonar.update();
     handleObstacle();
     drive.update();
@@ -132,29 +170,16 @@ void loop() {
 
         // Linie: L/M/R, '#' = schwarze Linie, '.' = keine Linie
         LineSensor::Reading line = lineSensor.read();
-        Serial.print("Linie: ");
-        Serial.print(line.left   ? '#' : '.');
-        Serial.print(line.center ? '#' : '.');
-        Serial.print(line.right  ? '#' : '.');
-        Serial.print(" | Hindernis: ");
-        if (sonar.isValid()) {
-            Serial.print(sonar.getDistanceM(), 3);
-            Serial.print(" m");
-        } else {
-            Serial.print("--- ");
-        }
-        Serial.print(" | PWM L/R: ");
-        Serial.print(motors.getLeft(), 1);
-        Serial.print("% / ");
-        Serial.print(motors.getRight(), 1);
-        Serial.print("% | Fehler: ");
-        Serial.print(drive.getPulseError(), 1);
-        Serial.print(" Pulse | Trim: ");
-        Serial.print(drive.getTrim() * 100.0f, 1);
-        Serial.print("% || L: ");
-        Serial.print(data.leftSpeedMs, 3);
-        Serial.print(" m/s | R: ");
-        Serial.print(data.rightSpeedMs, 3);
-        Serial.println(" m/s");
+        String msg = "Linie: ";
+        msg += line.left   ? '#' : '.';
+        msg += line.center ? '#' : '.';
+        msg += line.right  ? '#' : '.';
+        msg += " | Hindernis: ";
+        msg += sonar.isValid() ? String(sonar.getDistanceM(), 3) + " m" : String("---");
+        msg += " | PWM L/R: " + String(motors.getLeft(), 1) + "% / " + String(motors.getRight(), 1) + "%";
+        msg += " | Fehler: " + String(drive.getPulseError(), 1) + " Pulse";
+        msg += " | Trim: " + String(drive.getTrim() * 100.0f, 1) + "%";
+        msg += " || L: " + String(data.leftSpeedMs, 3) + " m/s | R: " + String(data.rightSpeedMs, 3) + " m/s\n";
+        out(msg);
     }
 }
