@@ -1,8 +1,7 @@
 #include "MotorDriver.h"
+#include <initializer_list>
 
-MotorDriver::MotorDriver(uint8_t in1, uint8_t in2, uint8_t ena,
-                         uint8_t in3, uint8_t in4, uint8_t enb,
-                         uint8_t maxDutyPercent)
+MotorDriver::MotorDriver(uint8_t in1, uint8_t in2, uint8_t ena, uint8_t in3, uint8_t in4, uint8_t enb,   uint8_t maxDutyPercent)
     : _maxDutyPercent(constrain(maxDutyPercent, 0, 100))
 {
     _left.inA  = in1;  _left.inB  = in2;  _left.en  = ena;
