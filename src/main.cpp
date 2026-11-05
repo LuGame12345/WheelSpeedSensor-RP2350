@@ -31,7 +31,7 @@ BleUart ble;
 static constexpr const char *BLE_NAME = "Auto-Roboter";
 
 // Autonome Linienfolge (Taste 'l')
-LineFollower lineFollower(lineSensor, drive, speedSensors);
+LineFollower lineFollower(lineSensor, drive);
 
 int testSpeed = 50;                              // % für die Tastatursteuerung (+/- ändert)
 static constexpr float SLOW_DISTANCE_M = 0.10f;  // ab hier langsamer fahren
@@ -53,8 +53,7 @@ void printSettings() {
     out("Tempo: " + String(testSpeed) + " % | Kurs: " + String(drive.getBias() * 100.0f, 1) +
         " % | Kp: " + String(drive.getKp(), 2) + " | Ki: " + String(drive.getKi(), 2) + "\n");
     out("Linie: Basis " + String(lineFollower.baseSpeed, 0) + " % | Lenk-Kp " + String(lineFollower.kp, 2) +
-        " | Kd " + String(lineFollower.kd, 2) + " | Lücke max " + String(lineFollower.gapMaxMm, 0) +
-        " mm | Suche max " + String(lineFollower.searchMaxMm, 0) + " mm\n");
+        " | Kd " + String(lineFollower.kd, 2) + "\n");
 }
 
 void printHelp() {
@@ -262,8 +261,8 @@ void handleObstacle() {
     static bool blocked = false;   // steht gerade wegen eines Hindernisses
     float d = obstacleDistance();
 
-    // Vorwärts gewollt? Manuell (Sollwert) oder Linienfolge (FOLGEN/LUECKE, auch wenn gerade gebremst)
-    bool forward = drive.isMovingForward() || lineFollower.wantsForward();
+    // Vorwärts gewollt? Manuell (Sollwert) oder Linienfolge (auch wenn gerade gebremst)
+    bool forward = drive.isMovingForward() || lineFollower.isActive();
     if (!forward) {
         drive.setSpeedScale(1.0f);
         blocked = false;
@@ -302,25 +301,11 @@ void handleObstacle() {
     }
 }
 
-// Zustandswechsel der Linienfolge melden
-void reportLineState() {
-    static LineFollower::State last = LineFollower::State::Idle;
-    LineFollower::State now = lineFollower.getState();
-    if (now == last) return;
-    if (now == LineFollower::State::Stopped) {
-        out("Linie verloren → STOPP (nach " + String(lineFollower.searchMaxMm, 0) + " mm Suche)\n");
-    } else if (now != LineFollower::State::Idle) {
-        out(String("Linienfolge: ") + lineFollower.getStateName() + "\n");
-    }
-    last = now;
-}
-
 void loop() {
     handleCommands();
     sonar.update();
     handleObstacle();
     lineFollower.update();
-    reportLineState();
     drive.update();
 
     WheelSpeedSensor::SpeedData data;
@@ -332,13 +317,8 @@ void loop() {
         // Linie: L/M/R, '#' = schwarze Linie, '.' = keine Linie
         LineSensor::Reading line = lineSensor.read();
         String msg = "Modus: ";
-        if (lineFollower.getState() != LineFollower::State::Idle) {
-            msg += String("Linie/") + lineFollower.getStateName();
-            if (lineFollower.isPaused()) msg += "(Hindernis)";
-            if (lineFollower.getState() == LineFollower::State::Gap ||
-                lineFollower.getState() == LineFollower::State::Search) {
-                msg += " " + String(lineFollower.getStateDistanceMm(), 0) + " mm";
-            }
+        if (lineFollower.isActive()) {
+            msg += lineFollower.isPaused() ? "Linie (Hindernis)" : (lineFollower.inGap() ? "Linie (Lücke)" : "Linie");
         } else {
             msg += activeKey ? "manuell" : "steht";
         }

@@ -110,13 +110,12 @@ BLE-„Seriell“ über den Nordic UART Service (NUS) direkt mit BTstack (`att_d
 
 ### LineFollower-Bibliothek (`lib/LineFollower/`)
 
-Autonome Linienfolge nach dem Konzept „Linienverfolgung – Programmierkonzept“ (Linie 45 mm, Schleife mit X-Kreuzung, in deren Mitte die Linie unterbrochen ist). Nutzt `LineSensor`, `DriveController`, `WheelSpeedSensor` per Referenz.
+Autonome Linienfolge, bewusst einfach: nur nach der Linienposition lenken. Nutzt `LineSensor` und `DriveController` per Referenz.
 
-- Zustände: **FOLGEN** (lenk = kp·pos + kd·Δpos/Δt; links = basis·(1+lenk), rechts = basis·(1−lenk)) → keine Linie → **LUECKE** (geradeaus, Strecke über Lichtschranken zählen) → nach `gapMaxMm` → **SUCHEN** (auf der Stelle zur zuletzt gesehenen Seite drehen) → nach `searchMaxMm` → **STOPP**.
-- Nach einer Lücke wird für `crossHoldMm` die Lenkung auf ±`crossSteer` begrenzt, damit er an der Kreuzung nicht in den schrägen Ast abbiegt.
-- Parameter sind öffentliche Felder (Startwerte: basis 40 %, kp 0.6, kd 0, Lücke 100 mm, Hold 50 mm, Suche 40 % / 400 mm).
-- Hindernisse: `main.cpp` pausiert per `setPaused()`; `wantsForward()` sagt der Hinderniserkennung, dass vorwärts gewollt ist (auch während gebremst).
-- `WheelSpeedSensor::getMetersPerPulse()` liefert die Strecke pro Puls (≈ 10,2 mm).
+- Nur Mitte (C) sieht die Linie → perfekt auf der Linie → geradeaus. Position aus `LineSensor::getPosition()` (−1 … +1).
+- lenk = kp·pos + kd·Δpos/Δt; links = basis·(1+lenk), rechts = basis·(1−lenk). Startwerte: basis 40 %, kp 0.6, kd 0 (öffentliche Felder).
+- **Lücke** (kein Sensor sieht die Linie, z. B. Mitte der X-Kreuzung): geradeaus mit Basistempo, bis die Linie wieder auftaucht (`inGap()`). Bewusst ohne Streckenmessung, ohne Suche, ohne Zustandsautomat (vom Nutzer so gewünscht).
+- Hindernisse: `main.cpp` pausiert per `setPaused()`; `isActive()` zählt dort als „will vorwärts“.
 
 ### `src/main.cpp`
 
@@ -124,4 +123,4 @@ Standard Arduino-Sketch: `setup()` initialisiert Serial (115200), alle Sensoren/
 
 **Fahren nur bei gehaltener Taste** (`holdKey()`/`checkHold()`): w/a/s/d fahren nur, solange Befehle nachkommen. Erste Wiederholung wird bis 600 ms erwartet (Tastenwiederholung des Betriebssystems), danach Abstand ≤ 200 ms – sonst `releaseKey()` → Stopp. Zusätzlich versteht `PadParser` das Bluefruit-Connect-Control-Pad (`!B<Taste><1|0><CRC>`, 5/6/7/8 = hoch/runter/links/rechts) mit echtem Drücken/Loslassen, dann ohne Timeout. Trennt sich das Handy, werden die Motoren gestoppt.
 
-Hinderniserkennung (`handleObstacle()`), nur bei Vorwärtsfahrt (manuell oder `lineFollower.wantsForward()`); nach einem Stopp geht es erst weiter, wenn der Weg über 10 cm frei ist (Linienfolge wird solange pausiert): zwischen 10 cm und dem Bremspunkt stufenlos gedrosselt (`setSpeedScale` 0.5 → 0.2), am Bremspunkt `drive.brake()`. Bremspunkt = `STOP_DISTANCE_M` (5 cm) + Geschwindigkeit × `REACTION_TIME_S` (0,15 s), damit er etwa bei 5 cm steht; Geschwindigkeit = Mittel beider Lichtschranken (alle 200 ms). Rückwärts und Drehen bleiben immer erlaubt und ungedrosselt. **Wichtig:** Der HC-SR04 liefert unter ~3 cm kein gültiges Echo – `obstacleDistance()` wertet ein fehlendes Echo nach einem nahen Messwert (< 10 cm) deshalb als 0 m statt als „frei“. Stoppgrenze nicht unter ~4 cm setzen.
+Hinderniserkennung (`handleObstacle()`), nur bei Vorwärtsfahrt (manuell oder Linienfolge aktiv); nach einem Stopp geht es erst weiter, wenn der Weg über 10 cm frei ist (Linienfolge wird solange pausiert): zwischen 10 cm und dem Bremspunkt stufenlos gedrosselt (`setSpeedScale` 0.5 → 0.2), am Bremspunkt `drive.brake()`. Bremspunkt = `STOP_DISTANCE_M` (5 cm) + Geschwindigkeit × `REACTION_TIME_S` (0,15 s), damit er etwa bei 5 cm steht; Geschwindigkeit = Mittel beider Lichtschranken (alle 200 ms). Rückwärts und Drehen bleiben immer erlaubt und ungedrosselt. **Wichtig:** Der HC-SR04 liefert unter ~3 cm kein gültiges Echo – `obstacleDistance()` wertet ein fehlendes Echo nach einem nahen Messwert (< 10 cm) deshalb als 0 m statt als „frei“. Stoppgrenze nicht unter ~4 cm setzen.
