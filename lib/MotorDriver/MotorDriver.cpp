@@ -1,8 +1,9 @@
 #include "MotorDriver.h"
 #include <initializer_list>
 
-MotorDriver::MotorDriver(uint8_t in1, uint8_t in2, uint8_t ena, uint8_t in3, uint8_t in4, uint8_t enb,   uint8_t maxDutyPercent)
-    : _maxDutyPercent(constrain(maxDutyPercent, 0, 100))
+MotorDriver::MotorDriver(uint8_t in1, uint8_t in2, uint8_t ena, uint8_t in3, uint8_t in4, uint8_t enb,   uint8_t maxDutyPercent, uint8_t minDutyPercent)
+    : _maxDutyPercent(constrain(maxDutyPercent, 0, 100)),
+      _minDutyPercent(constrain(minDutyPercent, 0, _maxDutyPercent))
 {
     _left.inA  = in1;  _left.inB  = in2;  _left.en  = ena;
     _right.inA = in3;  _right.inB = in4;  _right.en = enb;
@@ -27,11 +28,11 @@ void MotorDriver::begin() {
     stop();
 }
 
-void MotorDriver::_apply(Channel &ch, int percent) {
-    percent    = constrain(percent, -100, 100);
+void MotorDriver::_apply(Channel &ch, float percent) {
+    percent    = constrain(percent, -100.0f, 100.0f);
     ch.percent = percent;
 
-    int dir = ch.inverted ? -percent : percent;
+    float dir = ch.inverted ? -percent : percent;
 
     if (dir > 0) {
         digitalWrite(ch.inA, HIGH);
@@ -44,18 +45,21 @@ void MotorDriver::_apply(Channel &ch, int percent) {
         digitalWrite(ch.inB, LOW);
     }
 
-    // 0..100 % Sollwert → 0..maxDuty % Tastgrad
-    uint32_t duty = (uint32_t)abs(percent) * _maxDutyPercent * _pwmRange / 10000;
+    // 0 % → aus, sonst 0..100 % Sollwert → minDuty..maxDuty % Tastgrad
+    float mag = fabsf(percent);
+    float dutyPercent = (mag < 0.01f) ? 0.0f
+        : _minDutyPercent + mag * (_maxDutyPercent - _minDutyPercent) / 100.0f;
+    uint32_t duty = (uint32_t)(dutyPercent * _pwmRange / 100.0f);
     analogWrite(ch.en, duty);
 }
 
-void MotorDriver::drive(int leftPercent, int rightPercent) {
+void MotorDriver::drive(float leftPercent, float rightPercent) {
     _apply(_left,  leftPercent);
     _apply(_right, rightPercent);
 }
 
-void MotorDriver::setLeft(int percent)  { _apply(_left,  percent); }
-void MotorDriver::setRight(int percent) { _apply(_right, percent); }
+void MotorDriver::setLeft(float percent)  { _apply(_left,  percent); }
+void MotorDriver::setRight(float percent) { _apply(_right, percent); }
 
 void MotorDriver::stop() {
     drive(0, 0);
