@@ -11,11 +11,19 @@ WheelSpeedSensor::WheelSpeedSensor(uint8_t pinLeft, uint8_t pinRight,
 }
 
 void WheelSpeedSensor::isrLeft() {
-    if (instance) instance->_countLeft++;
+    if (!instance) return;
+    uint32_t now = micros();
+    if (now - instance->_lastPulseUsLeft < instance->_debounceUs) return;  // Störpuls
+    instance->_lastPulseUsLeft = now;
+    instance->_countLeft++;
 }
 
 void WheelSpeedSensor::isrRight() {
-    if (instance) instance->_countRight++;
+    if (!instance) return;
+    uint32_t now = micros();
+    if (now - instance->_lastPulseUsRight < instance->_debounceUs) return;  // Störpuls
+    instance->_lastPulseUsRight = now;
+    instance->_countRight++;
 }
 
 void WheelSpeedSensor::begin() {

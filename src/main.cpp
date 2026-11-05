@@ -29,7 +29,7 @@ LineSensor lineSensor(7, 8, 9);
 BleUart ble;
 static constexpr const char *BLE_NAME = "Auto-Roboter";
 
-static constexpr int   TEST_SPEED      = 50;     // % für die Tastatursteuerung
+int testSpeed = 50;                              // % für die Tastatursteuerung (+/- ändert)
 static constexpr float SLOW_DISTANCE_M = 0.10f;  // ab hier langsamer fahren
 static constexpr float STOP_DISTANCE_M = 0.05f;  // ab hier sofort stoppen
                                                  // (HC-SR04 misst unter ~3 cm nicht zuverlässig)
@@ -45,9 +45,15 @@ void out(const String &text) {
     ble.print(text);
 }
 
+void printSettings() {
+    out("Tempo: " + String(testSpeed) + " % | Kurs: " + String(drive.getBias() * 100.0f, 1) +
+        " % | Kp: " + String(drive.getKp(), 2) + " | Ki: " + String(drive.getKi(), 2) + "\n");
+}
+
 void printHelp() {
     out("Initialisiert. Steuerung: w=vor, s=zurück, a=links, d=rechts, x=stopp, b=bremsen\n");
     out("Regelung: r=Trim zurücksetzen, n=Regelung an/aus, h=Hilfe\n");
+    out("Einstellen: +/- Tempo, ,/. Kurs links/rechts, p/P Kp, i/I Ki, g=Werte anzeigen\n");
 }
 
 void setup() {
@@ -67,10 +73,10 @@ void setup() {
 void handleCommand(char c) {
     static bool syncOn = true;
     switch (c) {
-        case 'w': drive.drive( TEST_SPEED,  TEST_SPEED); break;
-        case 's': drive.drive(-TEST_SPEED, -TEST_SPEED); break;
-        case 'a': drive.drive(-TEST_SPEED,  TEST_SPEED); break;
-        case 'd': drive.drive( TEST_SPEED, -TEST_SPEED); break;
+        case 'w': drive.drive( testSpeed,  testSpeed); break;
+        case 's': drive.drive(-testSpeed, -testSpeed); break;
+        case 'a': drive.drive(-testSpeed,  testSpeed); break;
+        case 'd': drive.drive( testSpeed, -testSpeed); break;
         case 'x': drive.stop();  break;
         case 'b': drive.brake(); break;
         case 'r': drive.resetTrim(); out("Trim zurückgesetzt\n"); break;
@@ -80,6 +86,18 @@ void handleCommand(char c) {
             out(syncOn ? "Regelung AN\n" : "Regelung AUS\n");
             break;
         case 'h': printHelp(); break;
+
+        // --- Einstellen fürs Geradeausfahren (wirkt sofort, auch während der Fahrt) ---
+        case '+': testSpeed = min(testSpeed + 10, 100); out("Tempo: " + String(testSpeed) + " %\n"); break;
+        case '-': testSpeed = max(testSpeed - 10, 10);  out("Tempo: " + String(testSpeed) + " %\n"); break;
+        // Kurs-Trim: zieht er nach links → '.' (mehr nach rechts), zieht er nach rechts → ','
+        case ',': drive.setBias(drive.getBias() - 0.005f); printSettings(); break;
+        case '.': drive.setBias(drive.getBias() + 0.005f); printSettings(); break;
+        case 'p': drive.setGains(max(drive.getKp() - 0.01f, 0.0f), drive.getKi()); printSettings(); break;
+        case 'P': drive.setGains(drive.getKp() + 0.01f, drive.getKi());            printSettings(); break;
+        case 'i': drive.setGains(drive.getKp(), max(drive.getKi() - 0.01f, 0.0f)); printSettings(); break;
+        case 'I': drive.setGains(drive.getKp(), drive.getKi() + 0.01f);            printSettings(); break;
+        case 'g': printSettings(); break;
         // Zeilenenden und Unbekanntes ignorieren (Apps senden oft "w\r\n")
     }
 }
@@ -177,6 +195,9 @@ void loop() {
         msg += " | Hindernis: ";
         msg += sonar.isValid() ? String(sonar.getDistanceM(), 3) + " m" : String("---");
         msg += " | PWM L/R: " + String(motors.getLeft(), 1) + "% / " + String(motors.getRight(), 1) + "%";
+        uint32_t tripL, tripR;
+        drive.getTripPulses(tripL, tripR);
+        msg += " | Pulse L/R: " + String(tripL) + "/" + String(tripR);
         msg += " | Fehler: " + String(drive.getPulseError(), 1) + " Pulse";
         msg += " | Trim: " + String(drive.getTrim() * 100.0f, 1) + "%";
         msg += " || L: " + String(data.leftSpeedMs, 3) + " m/s | R: " + String(data.rightSpeedMs, 3) + " m/s\n";

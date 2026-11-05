@@ -35,6 +35,17 @@ public:
     // true, wenn der Roboter insgesamt nach vorne fährt
     bool isMovingForward() const { return (_targetLeft + _targetRight) > 0.5f; }
     void setGains(float kp, float ki) { _kp = kp; _ki = ki; }
+    float getKp() const { return _kp; }
+    float getKi() const { return _ki; }
+
+    // Kurs-Trim für mechanische Unterschiede (z. B. Raddurchmesser), die die
+    // Lichtschranken nicht sehen: +0.01 = links soll 1 % mehr Pulse machen als rechts
+    // (Roboter zieht dann nach rechts). Einstellen, bis er wirklich geradeaus fährt.
+    void  setBias(float bias) { _bias = constrain(bias, -0.2f, 0.2f); }
+    float getBias() const { return _bias; }
+
+    // Pulse beider Räder seit dem letzten neuen Fahrbefehl (Diagnose)
+    void getTripPulses(uint32_t &left, uint32_t &right) const;
 
     // Gelernte Korrektur verwerfen (alle Fahrtrichtungen)
     void resetTrim();
@@ -62,8 +73,9 @@ private:
     bool  _syncEnabled = true;
     float _speedScale  = 1.0f;
 
-    float _kp = 0.03f;   // Korrektur pro Puls Vorsprung (0.03 = 3 %)
-    float _ki = 0.02f;   // Lernrate des Trims pro Puls und Sekunde
+    float _kp   = 0.08f;  // Korrektur pro Puls Vorsprung (0.08 = 8 %)
+    float _ki   = 0.05f;  // Lernrate des Trims pro Puls und Sekunde
+    float _bias = 0.0f;   // Kurs-Trim (siehe setBias)
     static constexpr float _maxCorrection = 0.30f;  // max. 30 % abbremsen
 
     unsigned long _lastMs = 0;

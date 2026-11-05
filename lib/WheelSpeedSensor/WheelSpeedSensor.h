@@ -26,6 +26,10 @@ public:
     // solange nur Differenzen gebildet werden)
     void getPulseCounts(uint32_t &left, uint32_t &right) const;
 
+    // Entprellung: Pulse, die schneller als minUs nach dem vorherigen kommen,
+    // werden als Störung verworfen. 2000 µs reichen bis ~1 m/s (≈100 Pulse/s).
+    void setDebounceUs(uint32_t minUs) { _debounceUs = minUs; }
+
 private:
     uint8_t _pinLeft;
     uint8_t _pinRight;
@@ -37,6 +41,11 @@ private:
     // Von den ISRs hochgezählte Flanken (werden nie zurückgesetzt)
     volatile uint32_t _countLeft  = 0;
     volatile uint32_t _countRight = 0;
+
+    // Zeitpunkt des letzten gezählten Pulses (für die Entprellung)
+    volatile uint32_t _lastPulseUsLeft  = 0;
+    volatile uint32_t _lastPulseUsRight = 0;
+    volatile uint32_t _debounceUs       = 2000;
 
     // Zählerstände beim letzten update()
     uint32_t _lastLeft  = 0;

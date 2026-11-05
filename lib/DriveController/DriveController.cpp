@@ -38,6 +38,13 @@ void DriveController::brake() {
     _motors.brake();
 }
 
+void DriveController::getTripPulses(uint32_t &left, uint32_t &right) const {
+    uint32_t l, r;
+    _sensors.getPulseCounts(l, r);
+    left  = l - _startLeft;
+    right = r - _startRight;
+}
+
 void DriveController::resetTrim() {
     for (float &t : _trim) t = 0;
 }
@@ -68,7 +75,10 @@ void DriveController::update() {
 
     // Strecken-Fehler, normiert auf das gewünschte Verhältnis a:b.
     // Geradeaus (a == b) ist das einfach pL - pR.
-    _error = (pL * b - pR * a) / max(a, b);
+    // Kurs-Trim: Sollverhältnis leicht verschieben (nur für die Fehlerberechnung)
+    float aT = a * (1.0f + _bias);
+    float bT = b * (1.0f - _bias);
+    _error = (pL * bT - pR * aT) / max(aT, bT);
 
     // Trim lernen (Integral), begrenzt gegen Aufschaukeln
     float &trim = _trim[_trimIndex()];

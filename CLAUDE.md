@@ -44,7 +44,7 @@ WheelSpeedSensor(uint8_t pinLeft, uint8_t pinRight, float wheelDiameterMm, int s
 // pinLeft=21, pinRight=20, Durchmesser=65 mm, Aussparungen=20
 ```
 
-Die ISR-Zähler laufen durch (kein Reset); `update()` bildet Differenzen. `getPulseCounts(l, r)` liefert die Gesamtpulse seit `begin()` (wird vom DriveController genutzt).
+Die ISRs entprellen per `micros()` (Pulse < 2000 µs nach dem vorherigen werden verworfen, `setDebounceUs()`). Die ISR-Zähler laufen durch (kein Reset); `update()` bildet Differenzen. `getPulseCounts(l, r)` liefert die Gesamtpulse seit `begin()` (wird vom DriveController genutzt).
 
 ### MotorDriver-Bibliothek (`lib/MotorDriver/`)
 
@@ -72,6 +72,8 @@ Gleichlaufregelung über die Lichtschranken, damit der Roboter geradeaus fährt.
 - Fehler = Pulsdifferenz (= Streckendifferenz) seit dem letzten neuen `drive()`-Sollwert, normiert auf das Sollverhältnis links:rechts.
 - Korrektur = `kp * Fehler + Trim`; der Trim ist ein Integral, das die dauerhafte Motorabweichung lernt und über Fahrten hinweg behalten wird (getrennt je Vor-/Rückwärts-Kombination). Gelernt wird nur im RAM, nach einem Reset beginnt er bei 0.
 - Es wird immer das schnellere Rad gebremst (max. 30 %).
+- Standard: `kp = 0.08`, `ki = 0.05` (zur Laufzeit per `setGains()` änderbar).
+- **Kurs-Trim** `setBias()`: verschiebt das Soll-Pulsverhältnis (+0.01 = links 1 % mehr Pulse → zieht nach rechts). Gleicht mechanische Unterschiede (Raddurchmesser, Schlupf) aus, die die Lichtschranken nicht sehen. Nur im RAM – gefundenen Wert in `setup()` fest eintragen.
 - Regelung nur, wenn beide Sollwerte ≠ 0 (die Lichtschranken erkennen keine Drehrichtung).
 - `update()` muss in jedem `loop()` aufgerufen werden (regelt alle 20 ms).
 
@@ -108,6 +110,6 @@ BLE-„Seriell“ über den Nordic UART Service (NUS) direkt mit BTstack (`att_d
 
 ### `src/main.cpp`
 
-Standard Arduino-Sketch: `setup()` initialisiert Serial (115200), alle Sensoren/Motoren und `ble.begin()`. `loop()` wertet Befehle über Serial **und BLE** aus (`handleCommand()`: w/s/a/d = fahren, x = stopp, b = bremsen, r = Trim zurücksetzen, n = Regelung an/aus, h = Hilfe), ruft `sonar.update()`, `handleObstacle()` und `drive.update()` auf und gibt alle 200 ms Liniensensor (`#` = Linie, `.` = keine), Hindernisabstand (m), PWM, Pulsfehler, Trim und Geschwindigkeiten aus. Alle Ausgaben laufen über `out()` an USB und BLE. Trennt sich das Handy, werden die Motoren gestoppt.
+Standard Arduino-Sketch: `setup()` initialisiert Serial (115200), alle Sensoren/Motoren und `ble.begin()`. `loop()` wertet Befehle über Serial **und BLE** aus (`handleCommand()`: w/s/a/d = fahren, x = stopp, b = bremsen, r = Trim zurücksetzen, n = Regelung an/aus, h = Hilfe; Einstellen: `+`/`-` Tempo, `,`/`.` Kurs-Trim, `p`/`P` Kp, `i`/`I` Ki, `g` Werte anzeigen), ruft `sonar.update()`, `handleObstacle()` und `drive.update()` auf und gibt alle 200 ms Liniensensor (`#` = Linie, `.` = keine), Hindernisabstand (m), PWM, Pulse seit Fahrbefehl L/R, Pulsfehler, Trim und Geschwindigkeiten aus. Alle Ausgaben laufen über `out()` an USB und BLE. Trennt sich das Handy, werden die Motoren gestoppt.
 
 Hinderniserkennung (`handleObstacle()`), nur bei Vorwärtsfahrt: zwischen 10 cm und dem Bremspunkt stufenlos gedrosselt (`setSpeedScale` 0.5 → 0.2), am Bremspunkt `drive.brake()`. Bremspunkt = `STOP_DISTANCE_M` (5 cm) + Geschwindigkeit × `REACTION_TIME_S` (0,15 s), damit er etwa bei 5 cm steht; Geschwindigkeit = Mittel beider Lichtschranken (alle 200 ms). Rückwärts und Drehen bleiben immer erlaubt und ungedrosselt. **Wichtig:** Der HC-SR04 liefert unter ~3 cm kein gültiges Echo – `obstacleDistance()` wertet ein fehlendes Echo nach einem nahen Messwert (< 10 cm) deshalb als 0 m statt als „frei“. Stoppgrenze nicht unter ~4 cm setzen.
