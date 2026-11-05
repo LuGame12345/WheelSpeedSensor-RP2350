@@ -43,6 +43,22 @@ WheelSpeedSensor(uint8_t pinLeft, uint8_t pinRight, float wheelDiameterMm, int s
 // pinLeft=21, pinRight=20, Durchmesser=65 mm, Aussparungen=20
 ```
 
+### MotorDriver-Bibliothek (`lib/MotorDriver/`)
+
+Ansteuerung des L298N-Motortreibers (Pinbelegung siehe `Schaltungsdokumentation.pdf`).
+
+```cpp
+MotorDriver(uint8_t in1, uint8_t in2, uint8_t ena,
+            uint8_t in3, uint8_t in4, uint8_t enb, uint8_t maxDutyPercent = 80)
+// Links: IN1=0, IN2=1, ENA=2 · Rechts: IN3=4, IN4=5, ENB=3
+```
+
+- Geschwindigkeit in Prozent: `drive(left, right)`, `setLeft()`, `setRight()` mit -100..+100.
+- `stop()` lässt auslaufen (Enable aus), `brake()` bremst aktiv (IN-Pins beide HIGH).
+- Der PWM-Tastgrad wird auf `maxDutyPercent` begrenzt (3–6-V-Motoren an 2S-Akku bis 8,4 V).
+- `setInverted(left, right)` kehrt die Richtung falsch herum verbauter Motoren um.
+- **PWM global:** `begin()` setzt `analogWriteFreq(1000)` und `analogWriteRange(1000)`; das gilt in arduino-pico für alle `analogWrite`-Pins.
+
 ### `src/main.cpp`
 
-Standard Arduino-Sketch: `setup()` initialisiert Serial (115200) und ruft `speedSensors.begin()` auf; `loop()` ruft `speedSensors.update(data)` auf und gibt bei neuen Daten die Werte über Serial aus.
+Standard Arduino-Sketch: `setup()` initialisiert Serial (115200), `motors.begin()` und `speedSensors.begin()`. `loop()` wertet Tastaturbefehle über Serial aus (w/s/a/d = fahren, x = stopp, b = bremsen) und gibt alle 200 ms Motor-Sollwerte und gemessene Geschwindigkeiten aus.
