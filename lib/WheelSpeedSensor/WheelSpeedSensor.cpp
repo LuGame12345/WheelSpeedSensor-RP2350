@@ -25,8 +25,17 @@ void WheelSpeedSensor::begin() {
     pinMode(_pinRight, INPUT_PULLUP);
 
     _previousMillis = millis();
+    getPulseCounts(_lastLeft, _lastRight);
     attachInterrupt(digitalPinToInterrupt(_pinLeft),  isrLeft,  RISING);
     attachInterrupt(digitalPinToInterrupt(_pinRight), isrRight, RISING);
+}
+
+void WheelSpeedSensor::getPulseCounts(uint32_t &left, uint32_t &right) const {
+    // Beide Zähler atomar (zum selben Zeitpunkt) auslesen
+    noInterrupts();
+    left  = _countLeft;
+    right = _countRight;
+    interrupts();
 }
 
 bool WheelSpeedSensor::update(SpeedData &data) {
@@ -36,13 +45,12 @@ bool WheelSpeedSensor::update(SpeedData &data) {
     float elapsed   = (now - _previousMillis) / 1000.0f;
     _previousMillis = now;
 
-    // Zähler atomar auslesen und zurücksetzen
-    noInterrupts();
-    uint32_t lPulses = _countLeft;
-    uint32_t rPulses = _countRight;
-    _countLeft  = 0;
-    _countRight = 0;
-    interrupts();
+    uint32_t l, r;
+    getPulseCounts(l, r);
+    uint32_t lPulses = l - _lastLeft;
+    uint32_t rPulses = r - _lastRight;
+    _lastLeft  = l;
+    _lastRight = r;
 
     data.leftSpeedMs   = (lPulses * _metersPerPulse) / elapsed;
     data.leftSpeedKmh  = data.leftSpeedMs  * 3.6f;
