@@ -51,7 +51,7 @@ void printSettings() {
 }
 
 void printHelp() {
-    out("Initialisiert. Steuerung: w=vor, s=zurück, a=links, d=rechts, x=stopp, b=bremsen\n");
+    out("Initialisiert. Steuerung (gedrückt halten): w=vor, s=zurück, a=links, d=rechts, x=stopp, b=bremsen\n");
     out("Regelung: r=Trim zurücksetzen, n=Regelung an/aus, h=Hilfe\n");
     out("Einstellen: +/- Tempo, ,/. Kurs links/rechts, p/P Kp, i/I Ki, g=Werte anzeigen\n");
 }
@@ -69,16 +69,93 @@ void setup() {
     printHelp();
 }
 
-// Einen Steuerbefehl ausführen – egal ob er per USB oder BLE kam
-void handleCommand(char c) {
-    static bool syncOn = true;
-    switch (c) {
+// ---------------- Fahren nur solange die Taste gehalten wird ----------------
+//
+// Tastatur / Terminal-Apps: Beim Gedrückthalten schickt das Betriebssystem die Taste
+// wiederholt (erst nach ~0,5 s, dann ~30×/s). Bleiben die Wiederholungen aus, ist
+// die Taste losgelassen → stoppen.
+// Bluefruit-Connect-Control-Pad: meldet „gedrückt“/„losgelassen“ direkt.
+static constexpr unsigned long HOLD_FIRST_MS  = 600;  // bis die Tastenwiederholung einsetzt
+static constexpr unsigned long HOLD_REPEAT_MS = 200;  // Abstand zwischen Wiederholungen + Reserve
+
+char          activeKey = 0;      // aktuell gehaltene Fahrtaste (0 = keine)
+bool          repeating = false;  // Wiederholung schon angekommen?
+bool          padHeld   = false;  // vom Control Pad gehalten (kein Timeout nötig)
+unsigned long lastKeyMs = 0;
+
+void applyMove(char key) {
+    switch (key) {
         case 'w': drive.drive( testSpeed,  testSpeed); break;
         case 's': drive.drive(-testSpeed, -testSpeed); break;
         case 'a': drive.drive(-testSpeed,  testSpeed); break;
         case 'd': drive.drive( testSpeed, -testSpeed); break;
-        case 'x': drive.stop();  break;
-        case 'b': drive.brake(); break;
+    }
+}
+
+void holdKey(char key, bool fromPad = false) {
+    if (key == activeKey) {
+        repeating = true;                 // Wiederholung → weiterfahren
+    } else {
+        activeKey = key;
+        repeating = false;
+        applyMove(key);
+    }
+    padHeld   = fromPad;
+    lastKeyMs = millis();
+}
+
+void releaseKey() {
+    activeKey = 0;
+    padHeld   = false;
+    drive.stop();
+}
+
+// In jedem loop(): Taste nicht mehr gehalten → stoppen
+void checkHold() {
+    if (!activeKey || padHeld) return;
+    unsigned long timeout = repeating ? HOLD_REPEAT_MS : HOLD_FIRST_MS;
+    if (millis() - lastKeyMs > timeout) releaseKey();
+}
+
+// Bluefruit Control Pad: "!B" + Taste + '1'/'0' + Prüfsumme
+//   5 = hoch, 6 = runter, 7 = links, 8 = rechts
+struct PadParser {
+    uint8_t buf[5];
+    uint8_t len = 0;
+
+    // true = Zeichen gehört zu einem Pad-Paket (nicht als Einzelbefehl auswerten)
+    bool feed(char c) {
+        if (len == 0 && c != '!') return false;
+        buf[len++] = c;
+        if (len == 2 && buf[1] != 'B') { len = 0; return true; }  // anderes Paket → ignorieren
+        if (len < 5) return true;
+        len = 0;
+
+        uint8_t sum = buf[0] + buf[1] + buf[2] + buf[3];
+        if ((uint8_t)~sum != buf[4]) return true;               // Prüfsumme falsch
+
+        char key = 0;
+        switch (buf[2]) {
+            case '5': key = 'w'; break;
+            case '6': key = 's'; break;
+            case '7': key = 'a'; break;
+            case '8': key = 'd'; break;
+        }
+        if (!key) return true;
+        if (buf[3] == '1')            holdKey(key, true);
+        else if (key == activeKey)    releaseKey();
+        return true;
+    }
+};
+PadParser serialPad, blePad;
+
+// Einen Steuerbefehl ausführen – egal ob er per USB oder BLE kam
+void handleCommand(char c) {
+    static bool syncOn = true;
+    switch (c) {
+        case 'w': case 's': case 'a': case 'd': holdKey(c); break;
+        case 'x': releaseKey(); break;
+        case 'b': releaseKey(); drive.brake(); break;
         case 'r': drive.resetTrim(); out("Trim zurückgesetzt\n"); break;
         case 'n':
             syncOn = !syncOn;
@@ -103,8 +180,9 @@ void handleCommand(char c) {
 }
 
 void handleCommands() {
-    while (Serial.available()) handleCommand(Serial.read());
-    while (ble.available())    handleCommand(ble.read());
+    while (Serial.available()) { char c = Serial.read(); if (!serialPad.feed(c)) handleCommand(c); }
+    while (ble.available())    { char c = ble.read();    if (!blePad.feed(c))    handleCommand(c); }
+    checkHold();
 
     // Einmalig melden, sobald Bluetooth läuft (bzw. nach 5 s, falls nicht)
     static bool readyReported = false;
@@ -122,7 +200,7 @@ void handleCommands() {
     if (connected && !wasConnected) {
         Serial.println("BLE verbunden");
     } else if (!connected && wasConnected) {
-        drive.stop();
+        releaseKey();
         Serial.println("BLE getrennt → Motoren gestoppt");
     }
     wasConnected = connected;
