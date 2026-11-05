@@ -20,10 +20,10 @@ pio run --target upload && pio device monitor
 
 ## Zielplatform
 
-- **Board:** Seeed Studio XIAO RP2350 (`seeed_xiao_rp2350`)
-- **Chip:** RP2350 (Cortex-M33, 150 MHz), 2 MB Flash
-- **Framework:** Arduino via `framework-arduinopico`
-- **Platform-Quelle:** `https://github.com/Seeed-Studio/platform-seeedboards.git`
+- **Board:** Raspberry Pi Pico 2 W (`rpipico2w`)
+- **Chip:** RP2350 (Cortex-M33, 150 MHz), 4 MB Flash, WLAN/Bluetooth (CYW43439)
+- **Framework:** Arduino via `framework-arduinopico` (Earle Philhower Core)
+- **Platform-Quelle:** `https://github.com/maxgerhardt/platform-raspberrypi.git`
 
 ## Architektur
 
