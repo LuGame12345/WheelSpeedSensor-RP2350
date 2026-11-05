@@ -20,7 +20,7 @@ pio run --target upload && pio device monitor
 
 ## Zielplatform
 
-- **Board:** Seeed Studio XIAO RP2350 (`seeed_xiao_rp2350`) als Basis, aber per `board_build.variant = rpipico2w` + CYW43-Flags in `platformio.ini` auf den Pico 2 W umgebogen (nötig für BLE). Die Seeed-Platform akzeptiert nur ihre eigenen Board-Namen, daher keine eigene Board-JSON möglich. `-DPIO_FRAMEWORK_ARDUINO_ENABLE_BLUETOOTH` schaltet BTstack ein.
+- **Board:** Seeed Studio XIAO RP2350 (`seeed_xiao_rp2350`) als Basis, aber per `board_build.variant = rpipico2w` + CYW43-Flags in `platformio.ini` auf den Pico 2 W umgebogen (nötig für BLE). Die Seeed-Platform akzeptiert nur ihre eigenen Board-Namen, daher keine eigene Board-JSON möglich. `-DPIO_FRAMEWORK_ARDUINO_ENABLE_BLUETOOTH` schaltet BTstack ein. `default_envs = seeed_xiao_rp2350`; zusätzlich gibt es die optionale Umgebung `rpipico2w` (maxgerhardt-Platform, offizielles Pico-2-W-Board) – hat früher nicht funktioniert, nur gezielt mit `pio run -e rpipico2w` testen.
   - Physisch ist es ein Raspberry Pi Pico 2 W (siehe `Schaltungsdokumentation_auto.pdf`), es meldet sich per USB aber als XIAO RP2350. Die Konfiguration `rpipico2w` funktioniert nicht – XIAO-Konfiguration beibehalten. Pin-Nummern im Code sind GPIO-Nummern.
 - **Chip:** RP2350 (Cortex-M33, 150 MHz), 2 MB Flash
 - **Framework:** Arduino via `framework-arduinopico`
