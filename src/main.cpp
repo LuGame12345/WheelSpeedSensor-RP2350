@@ -13,9 +13,9 @@ WheelSpeedSensor speedSensors(21, 20, 65.0, 20);
 // L298N laut Schaltungsdokumentation:
 // Links:  IN1 = GPIO0, IN2 = GPIO1, ENA = GPIO2
 // Rechts: IN3 = GPIO4, IN4 = GPIO5, ENB = GPIO3
-// PWM-Tastgrad 35..80 %: max. 80 % (3–6-V-Motoren an 2S-Akku),
+// PWM-Tastgrad 35..100 %: volle Leistung (am Roboter geprüft, die Motoren vertragen 100 %),
 // min. 35 %, damit die Motoren auch bei kleinen Sollwerten anlaufen
-MotorDriver motors(0, 1, 2, 4, 5, 3, 80, 35);
+MotorDriver motors(0, 1, 2, 4, 5, 3, 100, 35);
 
 // Gleichlaufregelung über die Lichtschranken
 DriveController drive(motors, speedSensors);

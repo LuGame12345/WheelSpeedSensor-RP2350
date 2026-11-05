@@ -7,15 +7,15 @@
 // Kanal B = rechter Motor (IN3, IN4, ENB)
 //
 // Geschwindigkeit wird in Prozent angegeben: -100 (voll rückwärts) .. 0 .. +100 (voll vorwärts).
-// Der tatsächliche PWM-Tastgrad wird auf maxDutyPercent begrenzt, damit die
-// 3–6-V-Motoren bei vollem 2S-Akku (bis 8,4 V) nicht überlastet werden.
+// Der tatsächliche PWM-Tastgrad wird auf maxDutyPercent begrenzt (100 = keine Begrenzung).
+// Damit lassen sich bei Bedarf Motoren schützen, die die volle Akkuspannung nicht vertragen.
 // Jeder Sollwert ≠ 0 wird auf mindestens minDutyPercent abgebildet, damit die
 // Motoren auch bei kleinen Werten sicher anlaufen (1 % → minDuty, 100 % → maxDuty).
 class MotorDriver {
 public:
     MotorDriver(uint8_t in1, uint8_t in2, uint8_t ena,
                 uint8_t in3, uint8_t in4, uint8_t enb,
-                uint8_t maxDutyPercent = 80, uint8_t minDutyPercent = 0);
+                uint8_t maxDutyPercent = 100, uint8_t minDutyPercent = 0);
 
     // Pins als Ausgänge konfigurieren, PWM einrichten, Motoren stoppen
     void begin();

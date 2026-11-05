@@ -53,15 +53,15 @@ Ansteuerung des L298N-Motortreibers (Pinbelegung siehe `Schaltungsdokumentation_
 ```cpp
 MotorDriver(uint8_t in1, uint8_t in2, uint8_t ena,
             uint8_t in3, uint8_t in4, uint8_t enb,
-            uint8_t maxDutyPercent = 80, uint8_t minDutyPercent = 0)
+            uint8_t maxDutyPercent = 100, uint8_t minDutyPercent = 0)
 // Links: IN1=0, IN2=1, ENA=2 · Rechts: IN3=4, IN4=5, ENB=3
 ```
 
 - Geschwindigkeit in Prozent (float): `drive(left, right)`, `setLeft()`, `setRight()` mit -100..+100.
 - Beide Motoren sind verpolt angeschlossen → `main.cpp` ruft `motors.setInverted(true, true)` auf.
 - `stop()` lässt auslaufen (Enable aus), `brake()` bremst aktiv (IN-Pins beide HIGH).
-- Der PWM-Tastgrad wird auf `maxDutyPercent` begrenzt (3–6-V-Motoren an 2S-Akku bis 8,4 V).
-- Sollwerte ≠ 0 werden auf `minDutyPercent..maxDutyPercent` abgebildet (Anlauf-PWM; `main.cpp` nutzt 35..80). Unter ~35 % PWM laufen die Motoren nicht an.
+- Der PWM-Tastgrad wird auf `maxDutyPercent` begrenzt. `main.cpp` nutzt **100 %** (am Roboter geprüft: die Motoren vertragen volle Leistung; die frühere 80-%-Grenze aus der Schaltungsdoku ist aufgehoben).
+- Sollwerte ≠ 0 werden auf `minDutyPercent..maxDutyPercent` abgebildet (Anlauf-PWM; `main.cpp` nutzt 35..100). Unter ~35 % PWM laufen die Motoren nicht an.
 - `setInverted(left, right)` kehrt die Richtung falsch herum verbauter Motoren um.
 - **PWM global:** `begin()` setzt `analogWriteFreq(1000)` und `analogWriteRange(1000)`; das gilt in arduino-pico für alle `analogWrite`-Pins.
 
