@@ -39,10 +39,35 @@ static constexpr float REACTION_TIME_S = 0.15f;  // Bremsweg ≈ Geschwindigkeit
 static constexpr float SLOW_FACTOR_MAX = 0.5f;   // Geschwindigkeit bei SLOW_DISTANCE_M
 static constexpr float SLOW_FACTOR_MIN = 0.2f;   // Geschwindigkeit kurz vor STOP_DISTANCE_M
 
-// Text gleichzeitig an USB-Seriell und BLE schicken
-void out(const String &text) {
+// ---------------- Ausgabe an USB und BLE ----------------
+//
+// USB bekommt immer lesbaren Text. BLE bekommt standardmäßig denselben Text;
+// eine App kann mit "$FMT,JSON" auf maschinenlesbare JSON-Zeilen umschalten
+// (eine Zeile pro Nachricht, '\n' am Ende). Siehe docs/BLE_APP_SCHNITTSTELLE.md.
+bool bleJson = false;
+
+// Text für einen JSON-String maskieren (Anführungszeichen, Backslash, Zeilenenden)
+String jsonEscape(const String &text) {
+    String r;
+    for (size_t i = 0; i < text.length(); i++) {
+        char c = text[i];
+        if (c == '"' || c == '\\') { r += '\\'; r += c; }
+        else if (c == '\n' || c == '\r') { /* weglassen */ }
+        else r += c;
+    }
+    return r;
+}
+
+// Ein Ereignis ausgeben: USB als Text, BLE als Text oder JSON-Zeile
+void outEvent(const String &json, const String &text) {
     Serial.print(text);
-    ble.print(text);
+    if (bleJson) ble.print(json + "\n");
+    else         ble.print(text);
+}
+
+// Freier Text (Hilfe, Bestätigungen) → in JSON als {"t":"msg","text":"..."}
+void out(const String &text) {
+    outEvent("{\"t\":\"msg\",\"text\":\"" + jsonEscape(text) + "\"}", text);
 }
 
 void printSettings() {
@@ -54,6 +79,7 @@ void printHelp() {
     out("Initialisiert. Steuerung (gedrückt halten): w=vor, s=zurück, a=links, d=rechts, x=stopp, b=bremsen\n");
     out("Regelung: r=Trim zurücksetzen, n=Regelung an/aus, h=Hilfe\n");
     out("Einstellen: +/- Tempo, ,/. Kurs links/rechts, p/P Kp, i/I Ki, g=Werte anzeigen\n");
+    out("App: $J,x,y (Joystick), $STOP, $BRAKE, $SPEED,n, $FMT,JSON|TEXT, $PING, $INFO\n");
 }
 
 void setup() {
@@ -78,6 +104,7 @@ void setup() {
 static constexpr unsigned long HOLD_FIRST_MS  = 600;  // bis die Tastenwiederholung einsetzt
 static constexpr unsigned long HOLD_REPEAT_MS = 200;  // Abstand zwischen Wiederholungen + Reserve
 
+bool          joyActive = false;  // Joystick steuert gerade (siehe unten)
 char          activeKey = 0;      // aktuell gehaltene Fahrtaste (0 = keine)
 bool          repeating = false;  // Wiederholung schon angekommen?
 bool          padHeld   = false;  // vom Control Pad gehalten (kein Timeout nötig)
@@ -98,6 +125,7 @@ void holdKey(char key, bool fromPad = false) {
     } else {
         activeKey = key;
         repeating = false;
+        joyActive = false;
         applyMove(key);
     }
     padHeld   = fromPad;
@@ -107,6 +135,7 @@ void holdKey(char key, bool fromPad = false) {
 void releaseKey() {
     activeKey = 0;
     padHeld   = false;
+    joyActive = false;
     drive.stop();
 }
 
@@ -115,6 +144,57 @@ void checkHold() {
     if (!activeKey || padHeld) return;
     unsigned long timeout = repeating ? HOLD_REPEAT_MS : HOLD_FIRST_MS;
     if (millis() - lastKeyMs > timeout) releaseKey();
+}
+
+ // ---------------- Joystick (App) ----------------
+//
+// "$J,<x>,<y>" mit x, y = -100..100 (x: rechts positiv, y: vor positiv).
+// Die App muss den Wert wiederholen, solange der Joystick ausgelenkt ist
+// (empfohlen alle 50–100 ms). Kommt JOY_TIMEOUT_MS lang nichts → Stopp.
+static constexpr unsigned long JOY_TIMEOUT_MS = 300;
+static constexpr int           JOY_DEADZONE   = 8;    // kleine Auslenkungen ignorieren
+
+int           joyMaxSpeed = 70;    // % bei voller Auslenkung ("$SPEED,<n>")
+unsigned long lastJoyMs   = 0;
+
+void joystick(int x, int y) {
+    x = constrain(x, -100, 100);
+    y = constrain(y, -100, 100);
+    if (abs(x) < JOY_DEADZONE) x = 0;
+    if (abs(y) < JOY_DEADZONE) y = 0;
+
+    // Fahrtasten-Halten beenden, Joystick übernimmt
+    activeKey = 0;
+    padHeld   = false;
+
+    if (x == 0 && y == 0) {           // losgelassen
+        joyActive = false;
+        drive.stop();
+        return;
+    }
+
+    // Differentialantrieb mischen: vor/zurück + lenken
+    float l = y + x;
+    float r = y - x;
+    float m = max(max(fabsf(l), fabsf(r)), 100.0f);   // auf ±100 normieren
+    l = l / m * joyMaxSpeed;
+    r = r / m * joyMaxSpeed;
+
+    // Auf 2-%-Schritte runden, damit nicht jedes Zittern einen neuen Sollwert gibt
+    l = roundf(l / 2.0f) * 2.0f;
+    r = roundf(r / 2.0f) * 2.0f;
+
+    drive.drive(l, r);
+    joyActive = true;
+    lastJoyMs = millis();
+}
+
+void checkJoystick() {
+    if (joyActive && millis() - lastJoyMs > JOY_TIMEOUT_MS) {
+        joyActive = false;
+        drive.stop();
+        outEvent("{\"t\":\"timeout\"}", "Joystick-Timeout → Stopp\n");
+    }
 }
 
 // Bluefruit Control Pad: "!B" + Taste + '1'/'0' + Prüfsumme
@@ -149,6 +229,72 @@ struct PadParser {
 };
 PadParser serialPad, blePad;
 
+// ---------------- Erweiterte Befehle für Apps: "$NAME,arg,arg\n" ----------------
+void handleExtended(char *cmd) {
+    // Name und Argumente trennen
+    char *args = strchr(cmd, ',');
+    if (args) *args++ = '\0';
+
+    if (strcmp(cmd, "J") == 0) {
+        int x = 0, y = 0;
+        if (args) {
+            x = atoi(args);
+            char *second = strchr(args, ',');
+            if (second) y = atoi(second + 1);
+        }
+        joystick(x, y);
+    } else if (strcmp(cmd, "STOP") == 0) {
+        releaseKey();
+    } else if (strcmp(cmd, "BRAKE") == 0) {
+        releaseKey();
+        drive.brake();
+    } else if (strcmp(cmd, "SPEED") == 0 && args) {
+        joyMaxSpeed = constrain(atoi(args), 10, 100);
+        outEvent("{\"t\":\"speed\",\"max\":" + String(joyMaxSpeed) + "}",
+                 "Joystick-Tempo: " + String(joyMaxSpeed) + " %\n");
+    } else if (strcmp(cmd, "FMT") == 0 && args) {
+        bleJson = (strcmp(args, "JSON") == 0);
+        outEvent("{\"t\":\"fmt\",\"value\":\"" + String(bleJson ? "JSON" : "TEXT") + "\"}",
+                 String("BLE-Format: ") + (bleJson ? "JSON" : "TEXT") + "\n");
+    } else if (strcmp(cmd, "PING") == 0) {
+        outEvent("{\"t\":\"pong\"}", "PONG\n");
+    } else if (strcmp(cmd, "INFO") == 0) {
+        outEvent("{\"t\":\"info\",\"name\":\"" + String(BLE_NAME) + "\",\"proto\":1"
+                 ",\"maxSpeed\":" + String(joyMaxSpeed) +
+                 ",\"joyTimeoutMs\":" + String(JOY_TIMEOUT_MS) + "}",
+                 "Info: " + String(BLE_NAME) + ", Protokoll 1, Joystick-Tempo " + String(joyMaxSpeed) + " %\n");
+    } else {
+        outEvent("{\"t\":\"error\",\"msg\":\"unbekannter Befehl\",\"cmd\":\"" + jsonEscape(cmd) + "\"}",
+                 "Unbekannter Befehl: $" + String(cmd) + "\n");
+    }
+}
+
+// Sammelt "$...\n"-Zeilen. true = Zeichen gehört zu einer solchen Zeile.
+struct LineParser {
+    char    buf[48];
+    uint8_t len    = 0;
+    bool    active = false;
+
+    bool feed(char c) {
+        if (!active) {
+            if (c != '$') return false;
+            active = true;
+            len    = 0;
+            return true;
+        }
+        if (c == '\n' || c == '\r' || c == ';') {   // Zeilenende (';' für Apps ohne Zeilenumbruch)
+            buf[len] = '\0';
+            active = false;
+            if (len > 0) handleExtended(buf);
+            return true;
+        }
+        if (len < sizeof(buf) - 1) buf[len++] = c;
+        else active = false;                         // zu lang → verwerfen
+        return true;
+    }
+};
+LineParser serialLine, bleLine;
+
 // Einen Steuerbefehl ausführen – egal ob er per USB oder BLE kam
 void handleCommand(char c) {
     static bool syncOn = true;
@@ -180,9 +326,16 @@ void handleCommand(char c) {
 }
 
 void handleCommands() {
-    while (Serial.available()) { char c = Serial.read(); if (!serialPad.feed(c)) handleCommand(c); }
-    while (ble.available())    { char c = ble.read();    if (!blePad.feed(c))    handleCommand(c); }
+    while (Serial.available()) {
+        char c = Serial.read();
+        if (!serialLine.feed(c) && !serialPad.feed(c)) handleCommand(c);
+    }
+    while (ble.available()) {
+        char c = ble.read();
+        if (!bleLine.feed(c) && !blePad.feed(c)) handleCommand(c);
+    }
     checkHold();
+    checkJoystick();
 
     // Einmalig melden, sobald Bluetooth läuft (bzw. nach 5 s, falls nicht)
     static bool readyReported = false;
@@ -201,6 +354,7 @@ void handleCommands() {
         Serial.println("BLE verbunden");
     } else if (!connected && wasConnected) {
         releaseKey();
+        bleJson = false;                 // nächste Verbindung startet wieder im Textformat
         Serial.println("BLE getrennt → Motoren gestoppt");
     }
     wasConnected = connected;
@@ -237,8 +391,10 @@ void handleObstacle() {
 
     if (d < brakeDistance) {
         drive.brake();
-        out("STOPP: Hindernis bei " + String(d, 3) + " m (Bremspunkt " +
-            String(brakeDistance, 3) + " m bei " + String(currentSpeedMs, 2) + " m/s)\n");
+        outEvent("{\"t\":\"obstacle\",\"dist\":" + String(d, 3) + ",\"brakeAt\":" + String(brakeDistance, 3) +
+                 ",\"speed\":" + String(currentSpeedMs, 2) + "}",
+                 "STOPP: Hindernis bei " + String(d, 3) + " m (Bremspunkt " +
+                 String(brakeDistance, 3) + " m bei " + String(currentSpeedMs, 2) + " m/s)\n");
         return;
     }
 
@@ -279,6 +435,18 @@ void loop() {
         msg += " | Fehler: " + String(drive.getPulseError(), 1) + " Pulse";
         msg += " | Trim: " + String(drive.getTrim() * 100.0f, 1) + "%";
         msg += " || L: " + String(data.leftSpeedMs, 3) + " m/s | R: " + String(data.rightSpeedMs, 3) + " m/s\n";
-        out(msg);
+
+        const char *mode = joyActive ? "joystick" : (activeKey ? "keys" : "idle");
+        String json = "{\"t\":\"status\",\"ms\":" + String(millis()) +
+            ",\"mode\":\"" + mode + "\"" +
+            ",\"line\":[" + String(line.left) + "," + String(line.center) + "," + String(line.right) + "]" +
+            ",\"dist\":" + (sonar.isValid() ? String(sonar.getDistanceM(), 3) : String("null")) +
+            ",\"pwm\":[" + String(motors.getLeft(), 1) + "," + String(motors.getRight(), 1) + "]" +
+            ",\"speed\":[" + String(data.leftSpeedMs, 3) + "," + String(data.rightSpeedMs, 3) + "]" +
+            ",\"pulses\":[" + String(tripL) + "," + String(tripR) + "]" +
+            ",\"err\":" + String(drive.getPulseError(), 1) +
+            ",\"trim\":" + String(drive.getTrim() * 100.0f, 1) +
+            ",\"maxSpeed\":" + String(joyMaxSpeed) + "}";
+        outEvent(json, msg);
     }
 }
