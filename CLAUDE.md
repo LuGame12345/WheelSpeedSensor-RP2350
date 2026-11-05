@@ -85,8 +85,20 @@ UltrasonicSensor(uint8_t trigPin, uint8_t echoPin)   // TRIG=18, ECHO=19
 
 **Hardware:** ECHO liefert 5 V, GPIO19 ist nicht 5-V-tolerant → Spannungsteiler nötig (siehe PDF).
 
+### LineSensor-Bibliothek (`lib/LineSensor/`)
+
+3-Kanal-Spurfolgesensor, **LOW = schwarze Linie**, HIGH = keine Linie (am Roboter gemessen; per Konstruktor-Parameter `lineLevel` umstellbar). Pins als `INPUT` (Modul treibt selbst).
+
+```cpp
+LineSensor(uint8_t pinLeft, uint8_t pinCenter, uint8_t pinRight, uint8_t lineLevel = LOW)   // 7, 8, 9
+```
+
+- `read()` → `Reading{left, center, right}` (true = Linie)
+- `getPosition(pos)` → -1.0 (links) .. 0.0 (Mitte) .. +1.0 (rechts); `false`, wenn keine Linie erkannt
+- `readBits()` → Bitmuster L/M/R, z. B. `0b010` = mittig
+
 ### `src/main.cpp`
 
-Standard Arduino-Sketch: `setup()` initialisiert Serial (115200), `motors.begin()` und `speedSensors.begin()`. `loop()` wertet Tastaturbefehle über Serial aus (w/s/a/d = fahren, x = stopp, b = bremsen, r = Trim zurücksetzen, n = Regelung an/aus), ruft `sonar.update()`, `handleObstacle()` und `drive.update()` auf und gibt alle 200 ms Hindernisabstand (m), PWM, Pulsfehler, Trim und Geschwindigkeiten aus.
+Standard Arduino-Sketch: `setup()` initialisiert Serial (115200), `motors.begin()` und `speedSensors.begin()`. `loop()` wertet Tastaturbefehle über Serial aus (w/s/a/d = fahren, x = stopp, b = bremsen, r = Trim zurücksetzen, n = Regelung an/aus), ruft `sonar.update()`, `handleObstacle()` und `drive.update()` auf und gibt alle 200 ms Liniensensor (`#` = Linie, `.` = keine), Hindernisabstand (m), PWM, Pulsfehler, Trim und Geschwindigkeiten aus.
 
 Hinderniserkennung (`handleObstacle()`), nur bei Vorwärtsfahrt: zwischen 10 cm und dem Bremspunkt stufenlos gedrosselt (`setSpeedScale` 0.5 → 0.2), am Bremspunkt `drive.brake()`. Bremspunkt = `STOP_DISTANCE_M` (5 cm) + Geschwindigkeit × `REACTION_TIME_S` (0,15 s), damit er etwa bei 5 cm steht; Geschwindigkeit = Mittel beider Lichtschranken (alle 200 ms). Rückwärts und Drehen bleiben immer erlaubt und ungedrosselt. **Wichtig:** Der HC-SR04 liefert unter ~3 cm kein gültiges Echo – `obstacleDistance()` wertet ein fehlendes Echo nach einem nahen Messwert (< 10 cm) deshalb als 0 m statt als „frei“. Stoppgrenze nicht unter ~4 cm setzen.

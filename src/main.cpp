@@ -3,6 +3,7 @@
 #include "MotorDriver.h"
 #include "DriveController.h"
 #include "UltrasonicSensor.h"
+#include "LineSensor.h"
 
 // Lichtschranken: Pin Links = 21, Pin Rechts = 20, Raddurchmesser = 65 mm, Aussparungen = 20
 WheelSpeedSensor speedSensors(21, 20, 65.0, 20);
@@ -19,6 +20,9 @@ DriveController drive(motors, speedSensors);
 
 // HC-SR04: TRIG = GPIO18, ECHO = GPIO19
 UltrasonicSensor sonar(18, 19);
+
+// Spurfolgesensor: links = GPIO7, Mitte = GPIO8, rechts = GPIO9 (LOW = schwarze Linie)
+LineSensor lineSensor(7, 8, 9);
 
 static constexpr int   TEST_SPEED      = 50;     // % für die Tastatursteuerung
 static constexpr float SLOW_DISTANCE_M = 0.10f;  // ab hier langsamer fahren
@@ -38,6 +42,7 @@ void setup() {
     motors.setInverted(true, true);     // beide Motoren sind verpolt angeschlossen
     speedSensors.begin();
     sonar.begin();
+    lineSensor.begin();
     Serial.println("Initialisiert. Steuerung: w=vor, s=zurück, a=links, d=rechts, x=stopp, b=bremsen");
     Serial.println("Regelung: r=Trim zurücksetzen, n=Regelung an/aus");
 }
@@ -125,7 +130,13 @@ void loop() {
     if (speedSensors.update(data)) {
         currentSpeedMs = (data.leftSpeedMs + data.rightSpeedMs) / 2.0f;
 
-        Serial.print("Hindernis: ");
+        // Linie: L/M/R, '#' = schwarze Linie, '.' = keine Linie
+        LineSensor::Reading line = lineSensor.read();
+        Serial.print("Linie: ");
+        Serial.print(line.left   ? '#' : '.');
+        Serial.print(line.center ? '#' : '.');
+        Serial.print(line.right  ? '#' : '.');
+        Serial.print(" | Hindernis: ");
         if (sonar.isValid()) {
             Serial.print(sonar.getDistanceM(), 3);
             Serial.print(" m");
