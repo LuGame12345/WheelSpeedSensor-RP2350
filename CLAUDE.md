@@ -20,10 +20,11 @@ pio run --target upload && pio device monitor
 
 ## Zielplatform
 
-- **Board:** Raspberry Pi Pico 2 W (`rpipico2w`)
-- **Chip:** RP2350 (Cortex-M33, 150 MHz), 4 MB Flash, WLAN/Bluetooth (CYW43439)
-- **Framework:** Arduino via `framework-arduinopico` (Earle Philhower Core)
-- **Platform-Quelle:** `https://github.com/maxgerhardt/platform-raspberrypi.git`
+- **Board:** Seeed Studio XIAO RP2350 (`seeed_xiao_rp2350`)
+  - Physisch ist es ein Raspberry Pi Pico 2 W (siehe `Schaltungsdokumentation.pdf`), es meldet sich per USB aber als XIAO RP2350. Die Konfiguration `rpipico2w` funktioniert nicht – XIAO-Konfiguration beibehalten. Pin-Nummern im Code sind GPIO-Nummern.
+- **Chip:** RP2350 (Cortex-M33, 150 MHz), 2 MB Flash
+- **Framework:** Arduino via `framework-arduinopico`
+- **Platform-Quelle:** `https://github.com/Seeed-Studio/platform-seeedboards.git`
 
 ## Architektur
 
