@@ -2,7 +2,8 @@
 
 Dieses Dokument beschreibt alles, was eine Handy-App braucht, um den Roboter per Bluetooth zu steuern (Joystick) und seine Messwerte anzuzeigen. Es ist die verbindliche Schnittstelle zwischen Firmware und App.
 
-- **Firmware-Stand:** Branch `joystick`, Protokollversion `1`
+- **Firmware-Stand:** Branch `app`, Protokollversion `2`
+- **App-Konzept:** `docs/App_PS4_Controller_Konzept.pdf` (iOS-App mit PS4-Controller: Tastenbelegung, Modi, Not-Halt)
 - **Gerät:** Raspberry Pi Pico 2 W (RP2350 + Funkchip CYW43439), Arduino-Firmware mit BTstack
 
 ---
@@ -102,11 +103,48 @@ Dieses Dokument beschreibt alles, was eine Handy-App braucht, um den Roboter per
 | `$FMT,JSON` | – | Ausgaben an BLE als **JSON-Zeilen** | `{"t":"fmt","value":"JSON"}` |
 | `$FMT,TEXT` | – | Ausgaben an BLE als lesbarer Text (Standard) | Textzeile |
 | `$PING` | – | Verbindungstest | `{"t":"pong"}` |
-| `$INFO` | – | Geräteinfo | `{"t":"info","name":"Auto-Roboter","proto":1,"maxSpeed":70,"joyTimeoutMs":300}` |
+| `$INFO` | – | Geräteinfo | `{"t":"info","name":"Auto-Roboter","proto":2,"maxSpeed":70,"joyTimeoutMs":300,"hbTimeoutMs":1500,"selected":"manual","estop":false,"lineSpeed":40,"lineKp":0.60}` |
+| `$MODE,MANUAL` | – | Modus Manuell (L1/R1). Hält an (ausrollen) | `{"t":"mode","value":"manual"}` |
+| `$MODE,LINE` | – | Modus Autonom/Linienfolge (L1/R1). Hält an, wartet auf `$START` | `{"t":"mode","value":"line"}` |
+| `$START` | – | **X:** Ist der Not-Halt aktiv → nur Sperre lösen (fährt nicht los). Sonst im Modus `line` → Linienfolge starten | `{"t":"estop","active":false}` bzw. `{"t":"start","mode":"line"}` / `{"t":"start","mode":"manual"}` |
+| `$ESTOP` | – | **Dreieck – Not-Halt:** aktiv bremsen (Motorklemmen kurzgeschlossen), Linienfolge beenden, **alle Fahrbefehle gesperrt** bis `$START` | `{"t":"estop","active":true}` |
+| `$LINESPEED,<n>` | n: 10 … 100 | Tempo der Linienfolge in % (Steuerkreuz ↑/↓) | `{"t":"linespeed","value":40}` |
+| `$LINEKP,<v>` | v: 0 … 5 (Kommazahl, z. B. `0.7`) | Lenkstärke der Linienfolge (Steuerkreuz ←/→) | `{"t":"linekp","value":0.70}` |
+| `$BIAS,<v>` | v: −20 … 20 (%) | Kurs-Trim für Geradeauslauf im Modus Manuell | `{"t":"bias","value":0.5}` |
+| `$TRIMRESET` | – | Gelernten Motor-Trim löschen (Touchpad-Klick), nur im Stand | `msg` oder `error` „nur im Stand“ |
+| `$HB` | – | **Heartbeat**, alle 500 ms senden (siehe 4.3) | – |
 
 Unbekannte Befehle → `{"t":"error","msg":"unbekannter Befehl","cmd":"…"}`.
 
-### 4.2 Einzelzeichen-Befehle (Terminal, Tastatur, zum Testen)
+**Gesperrt während Not-Halt:** `$J`, Fahrtasten `w/a/s/d`, `l` und `$START` als Startbefehl (das erste `$START` löst nur die Sperre). `$STOP` und `$BRAKE` ändern nichts an der Sperre.
+
+**`$J` nur im Modus Manuell:** Im Modus `line` wird der Joystick ignoriert (R2/Stick fahren nur manuell).
+
+### 4.2 Heartbeat
+
+- Die App sendet `$HB\n` alle **500 ms**, solange sie verbunden ist – in jedem Modus.
+- Sobald der Pico einmal ein `$HB` bekommen hat, gilt: Kommt **1,5 s** lang **kein `$`-Befehl** (jeder `$`-Befehl zählt), hält der Pico alles an – **auch die Linienfolge** – und meldet `{"t":"hbtimeout"}`.
+- Ohne jemals `$HB` (z. B. Test mit einem Terminal) ist der Heartbeat nicht aktiv.
+- Nach einem Verbindungsabbruch muss die App den Heartbeat wieder beginnen.
+
+### 4.3 Controller-Belegung → Befehle (aus dem App-Konzept)
+
+| PS4-Taste | Befehl |
+|---|---|
+| R2 / L2 (analog) + linker Stick | `$J,<x>,<y>` mit x = Stick · 100, y = (R2 − L2) · 100 (nur Modus Manuell) |
+| L1 / R1 | `$MODE,MANUAL` / `$MODE,LINE` |
+| X | `$START` |
+| Kreis | `$STOP` (Aus: ausrollen, beendet auch die Linienfolge) |
+| Dreieck | `$ESTOP` (Not-Halt) – sofort, ohne Warteschlange |
+| Quadrat | Feinmodus: `$SPEED,30` an / vorheriges Tempo wieder aus |
+| Steuerkreuz ↑ / ↓ | `$LINESPEED,<n±10>` (Tempo im Autonom-Modus) |
+| Steuerkreuz ← / → | `$LINEKP,<v±0.1>` (Lenkstärke im Autonom-Modus) |
+| Touchpad klicken | `$TRIMRESET` |
+| Touchpad wischen, Options | nur App (Ansicht wechseln / Einstellungen), kein Befehl |
+
+Aktuelle Werte für ↑/↓ und ←/→ stehen in jeder `status`-Zeile (`lineSpeed`, `lineKp`).
+
+### 4.4 Einzelzeichen-Befehle (Terminal, Tastatur, zum Testen)
 
 Diese funktionieren weiterhin, z. B. für Tests mit einer Terminal-App. Für die eigene App sind die `$`-Befehle gedacht.
 
@@ -136,13 +174,19 @@ Jede JSON-Zeile hat das Feld `"t"` (Typ).
 ### 5.1 `status` – Messwerte, 5× pro Sekunde (alle 200 ms)
 
 ```json
-{"t":"status","ms":123456,"mode":"joystick","line":[0,1,0],"dist":0.153,"pwm":[45.0,45.0],"speed":[0.210,0.205],"pulses":[412,409],"err":1.0,"trim":2.5,"maxSpeed":70}
+{"t":"status","ms":123456,"mode":"joystick","line":[0,1,0],"dist":0.153,"pwm":[45.0,45.0],"speed":[0.210,0.205],"pulses":[412,409],"err":1.0,"trim":2.5,"maxSpeed":70,"selected":"manual","estop":false,"gap":false,"blocked":false,"lineSpeed":40,"lineKp":0.60}
 ```
 
 | Feld | Typ | Einheit | Bedeutung |
 |---|---|---|---|
 | `ms` | int | ms | Zeit seit Start des Roboters |
-| `mode` | string | – | `idle` (steht), `joystick` (App-Joystick), `keys` (Tastensteuerung) |
+| `mode` | string | – | Was gerade fährt: `idle` (steht), `joystick` (App-Joystick), `keys` (Tastensteuerung), `line` (Linienfolge läuft) |
+| `selected` | string | – | Gewählter Modus: `manual` oder `line` (per `$MODE`) |
+| `estop` | bool | – | `true` = Not-Halt aktiv, alles gesperrt bis `$START` |
+| `gap` | bool | – | `true` = Linienfolge sieht gerade keine Linie und fährt geradeaus (Lücke) |
+| `blocked` | bool | – | `true` = steht wegen eines Hindernisses (Linienfolge pausiert) |
+| `lineSpeed` | int | % | Tempo der Linienfolge |
+| `lineKp` | float | – | Lenkstärke der Linienfolge |
 | `line` | [int, int, int] | 0/1 | Spurfolgesensor links, Mitte, rechts; `1` = schwarze Linie erkannt |
 | `dist` | float \| `null` | m | Abstand zum Hindernis vorne (Ultraschall); `null` = kein Echo (frei > 4 m oder zu nah < 3 cm) |
 | `pwm` | [float, float] | % | Aktueller Sollwert links / rechts, −100 … 100 (negativ = rückwärts), nach Hindernis-Drosselung |
@@ -158,8 +202,15 @@ Jede JSON-Zeile hat das Feld `"t"` (Typ).
 |---|---|---|
 | `obstacle` | `{"t":"obstacle","dist":0.071,"brakeAt":0.074,"speed":0.16}` | Roboter hat wegen eines Hindernisses gebremst (Abstände in m, Tempo in m/s) |
 | `timeout` | `{"t":"timeout"}` | Joystick-Befehle blieben > 300 ms aus → Roboter hat angehalten |
+| `hbtimeout` | `{"t":"hbtimeout"}` | Heartbeat ausgeblieben (> 1,5 s kein `$`-Befehl) → alles angehalten, auch Linienfolge |
+| `estop` | `{"t":"estop","active":true}` | Not-Halt an (`true`) bzw. gelöst (`false`) |
+| `start` | `{"t":"start","mode":"line"}` | Start bestätigt (`line` = Linienfolge läuft, `manual` = bereit) |
+| `mode` | `{"t":"mode","value":"line"}` | Modus gewechselt |
+| `linespeed`, `linekp`, `bias` | `{"t":"linespeed","value":50}` | Neue Einstellung bestätigt |
 | `msg` | `{"t":"msg","text":"Trim zurückgesetzt"}` | Freitext (Hilfe, Bestätigungen) – zum Anzeigen oder Ignorieren |
 | `speed`, `fmt`, `pong`, `info`, `error` | siehe Tabelle 4.1 | Antworten auf Befehle |
+
+Bei einem Hindernis-Stopp kommt `obstacle` **einmal**; solange er steht, ist `blocked` in der status-Zeile `true`. Im Modus Linie fährt er von selbst weiter, sobald der Weg über 10 cm frei ist.
 
 Die App soll **unbekannte Typen und Felder ignorieren** (spätere Firmware kann mehr senden).
 
@@ -229,7 +280,9 @@ Ein Schieberegler 10–100 % sendet `$SPEED,<n>\n` (nur bei Änderung, nicht dau
 
 | Situation | Verhalten |
 |---|---|
-| BLE-Verbindung bricht ab | Sofort Stopp, Format zurück auf Text |
+| BLE-Verbindung bricht ab | Sofort Stopp (auch Linienfolge), Format zurück auf Text, Heartbeat aus. Ein aktiver Not-Halt bleibt bestehen |
+| Not-Halt (`$ESTOP`) | Aktiv bremsen, alle Fahrbefehle gesperrt, bis `$START` |
+| Heartbeat bleibt aus (> 1,5 s) | Alles anhalten + `{"t":"hbtimeout"}` |
 | Keine `$J`-Befehle für 300 ms | Stopp + `{"t":"timeout"}` |
 | Hindernis vorne < 10 cm | Vorwärts wird stufenlos langsamer (sichtbar an `pwm`) |
 | Hindernis am Bremspunkt (~5 cm + Bremsweg) | Bremsung + `{"t":"obstacle",…}`; vorwärts bleibt gesperrt, **rückwärts und drehen gehen weiter** |
@@ -248,10 +301,11 @@ Ein Schieberegler 10–100 % sendet `$SPEED,<n>\n` (nur bei Änderung, nicht dau
 5. Services entdecken → NUS → RX (`…0002`) und TX (`…0003`) holen.
 6. **Notifications auf TX aktivieren.**
 7. `$FMT,JSON\n` senden.
-8. `$INFO\n` senden → `info`-Antwort prüfen (`proto` = 1).
-9. Ab jetzt kommen `status`-Zeilen 5×/s → UI aktualisieren.
-10. Joystick nach Abschnitt 6 senden.
-11. Bei Verbindungsverlust: UI auf „getrennt“, automatisch neu scannen/verbinden, danach wieder ab Schritt 4.
+8. `$INFO\n` senden → `info`-Antwort prüfen (`proto` = 2), `selected` und `estop` übernehmen (der Pico ist die Wahrheit).
+9. Heartbeat starten: `$HB\n` alle 500 ms.
+10. Ab jetzt kommen `status`-Zeilen 5×/s → UI aktualisieren.
+11. Controller nach Abschnitt 4.3 umsetzen, Joystick nach Abschnitt 6.
+12. Bei Verbindungsverlust: UI auf „getrennt“, automatisch neu scannen/verbinden, danach wieder ab Schritt 4.
 
 ### Beispiel-Sitzung
 
@@ -286,8 +340,14 @@ TX       6E400003-B5A3-F393-E0A9-E50E24DCCA9E   notify                          
 Name     Auto-Roboter        Kein Pairing        1 Verbindung        UTF-8, Zeilen mit \n
 
 $FMT,JSON      JSON-Ausgabe einschalten (nach jedem Verbinden)
-$J,x,y         Joystick, x/y −100..100, alle 50–100 ms solange gedrückt, Timeout 300 ms
+$HB            Heartbeat alle 500 ms (Timeout 1,5 s)
+$J,x,y         Joystick, x/y −100..100, alle 50–100 ms solange gedrückt, Timeout 300 ms (nur Modus Manuell)
 $J,0,0         loslassen
-$SPEED,n       Höchsttempo 10..100 %
-$STOP $BRAKE $PING $INFO
+$SPEED,n       Höchsttempo Joystick 10..100 %
+$MODE,MANUAL|LINE   Modus (L1/R1)
+$START         X: Not-Halt lösen bzw. Linienfolge starten
+$ESTOP         Dreieck: Not-Halt mit Sperre
+$STOP          Kreis: Aus (ausrollen)
+$LINESPEED,n   $LINEKP,v   $BIAS,v   $TRIMRESET
+$BRAKE $PING $INFO
 ```

@@ -87,6 +87,7 @@ void printHelp() {
     out("Einstellen: +/- Tempo, ,/. Kurs links/rechts, p/P Kp, i/I Ki, g=Werte anzeigen\n");
     out("Linienfolge: l=start/stopp, k/K Lenk-Kp, m/M Kd, +/- Basistempo (während Linienfolge)\n");
     out("App: $J,x,y (Joystick), $STOP, $BRAKE, $SPEED,n, $FMT,JSON|TEXT, $PING, $INFO\n");
+    out("App: $ESTOP, $START, $MODE,MANUAL|LINE, $LINESPEED,n, $LINEKP,v, $BIAS,v, $TRIMRESET, $HB\n");
 }
 
 void setup() {
@@ -111,6 +112,18 @@ void setup() {
 static constexpr unsigned long HOLD_FIRST_MS  = 600;  // bis die Tastenwiederholung einsetzt
 static constexpr unsigned long HOLD_REPEAT_MS = 200;  // Abstand zwischen Wiederholungen + Reserve
 
+// ---------------- Modus und Not-Halt (Konzept „iOS-App mit PS4-Controller“) ----------------
+//
+// Modus MANUELL: Fahren per Joystick ($J) bzw. Tasten.  Modus AUTONOM (LINE): $START / X
+// startet die Linienfolge.  Not-Halt ($ESTOP / Dreieck): aktiv bremsen und ALLE Fahrbefehle
+// sperren, bis $START kommt. Danach steht er im gewählten Modus und fährt nicht von selbst los.
+enum class RobotMode { Manual, Line };
+RobotMode robotMode       = RobotMode::Manual;
+bool      estopActive     = false;
+bool      obstacleBlocked = false;   // steht gerade wegen eines Hindernisses
+
+const char *modeName() { return robotMode == RobotMode::Line ? "line" : "manual"; }
+
 bool          joyActive = false;  // Joystick steuert gerade (siehe unten)
 char          activeKey = 0;      // aktuell gehaltene Fahrtaste (0 = keine)
 bool          repeating = false;  // Wiederholung schon angekommen?
@@ -127,10 +140,12 @@ void applyMove(char key) {
 }
 
 void holdKey(char key, bool fromPad = false) {
+    if (estopActive) return;              // Not-Halt: keine Fahrbefehle
     if (key == activeKey) {
         repeating = true;                 // Wiederholung → weiterfahren
     } else {
         if (lineFollower.isActive()) lineFollower.stop();   // manuelle Übernahme
+        robotMode = RobotMode::Manual;
         activeKey = key;
         repeating = false;
         joyActive = false;
@@ -172,6 +187,9 @@ void joystick(int x, int y) {
     if (abs(x) < JOY_DEADZONE) x = 0;
     if (abs(y) < JOY_DEADZONE) y = 0;
 
+    // Not-Halt oder Modus Autonom: Joystick fährt nicht (R2/Stick nur im Modus Manuell)
+    if (estopActive || robotMode != RobotMode::Manual) return;
+
     // Fahrtasten-Halten beenden, Joystick übernimmt
     activeKey = 0;
     padHeld   = false;
@@ -203,6 +221,54 @@ void checkJoystick() {
         joyActive = false;
         drive.stop();
         outEvent("{\"t\":\"timeout\"}", "Joystick-Timeout → Stopp\n");
+    }
+}
+
+// ---------------- Not-Halt / Start / Modus ----------------
+void emergencyStop() {
+    activeKey = 0;
+    padHeld   = false;
+    joyActive = false;
+    if (lineFollower.isActive()) lineFollower.stop();
+    drive.brake();                         // Motorklemmen kurzschließen → aktiv bremsen
+    estopActive = true;
+    outEvent("{\"t\":\"estop\",\"active\":true}", "NOT-HALT – gesperrt bis X ($START)\n");
+}
+
+void startCommand() {
+    if (estopActive) {                     // 1. X nach Not-Halt: nur Sperre lösen
+        estopActive = false;
+        drive.stop();
+        outEvent("{\"t\":\"estop\",\"active\":false}", "Not-Halt gelöst – bereit\n");
+        return;
+    }
+    if (robotMode == RobotMode::Line) {
+        if (!lineFollower.isActive()) lineFollower.start();
+        outEvent("{\"t\":\"start\",\"mode\":\"line\"}", "Start: Linienfolge\n");
+    } else {
+        outEvent("{\"t\":\"start\",\"mode\":\"manual\"}", "Start: Manuell bereit\n");
+    }
+}
+
+void setMode(RobotMode m) {
+    if (!estopActive) releaseKey();        // beim Wechsel anhalten (ausrollen)
+    robotMode = m;
+    outEvent("{\"t\":\"mode\",\"value\":\"" + String(modeName()) + "\"}",
+             String("Modus: ") + (m == RobotMode::Line ? "Autonom (Linie)" : "Manuell") + "\n");
+}
+
+// ---------------- Heartbeat ----------------
+// Die App schickt "$HB" alle 500 ms. Hat sie das einmal getan und bleibt danach jedes
+// $-Kommando HB_TIMEOUT_MS lang aus, wird alles angehalten – auch die Linienfolge.
+static constexpr unsigned long HB_TIMEOUT_MS = 1500;
+bool          hbSeen   = false;
+unsigned long lastHbMs = 0;
+
+void checkHeartbeat() {
+    if (hbSeen && millis() - lastHbMs > HB_TIMEOUT_MS) {
+        hbSeen = false;
+        if (!estopActive) releaseKey();
+        outEvent("{\"t\":\"hbtimeout\"}", "Heartbeat fehlt → Stopp\n");
     }
 }
 
@@ -244,6 +310,8 @@ void handleExtended(char *cmd) {
     char *args = strchr(cmd, ',');
     if (args) *args++ = '\0';
 
+    lastHbMs = millis();                   // jedes $-Kommando zählt als Lebenszeichen
+
     if (strcmp(cmd, "J") == 0) {
         int x = 0, y = 0;
         if (args) {
@@ -252,11 +320,40 @@ void handleExtended(char *cmd) {
             if (second) y = atoi(second + 1);
         }
         joystick(x, y);
+    } else if (strcmp(cmd, "HB") == 0) {
+        hbSeen = true;
+    } else if (strcmp(cmd, "ESTOP") == 0) {
+        emergencyStop();
+    } else if (strcmp(cmd, "START") == 0) {
+        startCommand();
+    } else if (strcmp(cmd, "MODE") == 0 && args) {
+        if      (strcmp(args, "LINE") == 0)   setMode(RobotMode::Line);
+        else if (strcmp(args, "MANUAL") == 0) setMode(RobotMode::Manual);
     } else if (strcmp(cmd, "STOP") == 0) {
-        releaseKey();
+        if (!estopActive) releaseKey();    // Aus: ausrollen (beendet auch die Linienfolge)
     } else if (strcmp(cmd, "BRAKE") == 0) {
-        releaseKey();
+        if (!estopActive) releaseKey();
         drive.brake();
+    } else if (strcmp(cmd, "LINEKP") == 0 && args) {
+        lineFollower.kp = constrain(atof(args), 0.0f, 5.0f);
+        outEvent("{\"t\":\"linekp\",\"value\":" + String(lineFollower.kp, 2) + "}",
+                 "Lenk-Kp: " + String(lineFollower.kp, 2) + "\n");
+    } else if (strcmp(cmd, "LINESPEED") == 0 && args) {
+        lineFollower.baseSpeed = constrain(atof(args), 10.0f, 100.0f);
+        outEvent("{\"t\":\"linespeed\",\"value\":" + String(lineFollower.baseSpeed, 0) + "}",
+                 "Linien-Tempo: " + String(lineFollower.baseSpeed, 0) + " %\n");
+    } else if (strcmp(cmd, "BIAS") == 0 && args) {
+        drive.setBias(atof(args) / 100.0f);
+        outEvent("{\"t\":\"bias\",\"value\":" + String(drive.getBias() * 100.0f, 1) + "}",
+                 "Kurs-Trim: " + String(drive.getBias() * 100.0f, 1) + " %\n");
+    } else if (strcmp(cmd, "TRIMRESET") == 0) {
+        if (joyActive || activeKey || lineFollower.isActive()) {
+            outEvent("{\"t\":\"error\",\"msg\":\"nur im Stand\",\"cmd\":\"TRIMRESET\"}",
+                     "Trim-Reset nur im Stand\n");
+        } else {
+            drive.resetTrim();
+            out("Trim zurückgesetzt\n");
+        }
     } else if (strcmp(cmd, "SPEED") == 0 && args) {
         joyMaxSpeed = constrain(atoi(args), 10, 100);
         outEvent("{\"t\":\"speed\",\"max\":" + String(joyMaxSpeed) + "}",
@@ -268,10 +365,15 @@ void handleExtended(char *cmd) {
     } else if (strcmp(cmd, "PING") == 0) {
         outEvent("{\"t\":\"pong\"}", "PONG\n");
     } else if (strcmp(cmd, "INFO") == 0) {
-        outEvent("{\"t\":\"info\",\"name\":\"" + String(BLE_NAME) + "\",\"proto\":1"
+        outEvent("{\"t\":\"info\",\"name\":\"" + String(BLE_NAME) + "\",\"proto\":2"
                  ",\"maxSpeed\":" + String(joyMaxSpeed) +
-                 ",\"joyTimeoutMs\":" + String(JOY_TIMEOUT_MS) + "}",
-                 "Info: " + String(BLE_NAME) + ", Protokoll 1, Joystick-Tempo " + String(joyMaxSpeed) + " %\n");
+                 ",\"joyTimeoutMs\":" + String(JOY_TIMEOUT_MS) +
+                 ",\"hbTimeoutMs\":" + String(HB_TIMEOUT_MS) +
+                 ",\"selected\":\"" + modeName() + "\"" +
+                 ",\"estop\":" + (estopActive ? "true" : "false") +
+                 ",\"lineSpeed\":" + String(lineFollower.baseSpeed, 0) +
+                 ",\"lineKp\":" + String(lineFollower.kp, 2) + "}",
+                 "Info: " + String(BLE_NAME) + ", Protokoll 2, Joystick-Tempo " + String(joyMaxSpeed) + " %\n");
     } else {
         outEvent("{\"t\":\"error\",\"msg\":\"unbekannter Befehl\",\"cmd\":\"" + jsonEscape(cmd) + "\"}",
                  "Unbekannter Befehl: $" + String(cmd) + "\n");
@@ -324,9 +426,13 @@ void handleCommand(char c) {
             if (lineFollower.isActive()) {
                 lineFollower.stop();
                 out("Linienfolge AUS\n");
+            } else if (estopActive) {
+                out("Not-Halt aktiv – erst X / $START\n");
             } else {
                 activeKey = 0;
                 padHeld   = false;
+                joyActive = false;
+                robotMode = RobotMode::Line;
                 lineFollower.start();
                 out("Linienfolge AN\n");
             }
@@ -369,6 +475,7 @@ void handleCommands() {
     }
     checkHold();
     checkJoystick();
+    checkHeartbeat();
 
     // Einmalig melden, sobald Bluetooth läuft (bzw. nach 5 s, falls nicht)
     static bool readyReported = false;
@@ -386,8 +493,9 @@ void handleCommands() {
     if (connected && !wasConnected) {
         Serial.println("BLE verbunden");
     } else if (!connected && wasConnected) {
-        releaseKey();
+        if (!estopActive) releaseKey();  // bei Not-Halt bleibt die Bremse an
         bleJson = false;                 // nächste Verbindung startet wieder im Textformat
+        hbSeen  = false;
         Serial.println("BLE getrennt → Motoren gestoppt");
     }
     wasConnected = connected;
@@ -412,14 +520,13 @@ float obstacleDistance() {
 // Wird in jedem loop() geprüft, damit auch ein neuer 'w'-Befehl sofort abgefangen wird.
 // Rückwärts und Drehen bleiben immer erlaubt (und ungedrosselt), damit man wegkommt.
 void handleObstacle() {
-    static bool blocked = false;   // steht gerade wegen eines Hindernisses
     float d = obstacleDistance();
 
     // Vorwärts gewollt? Manuell (Sollwert) oder Linienfolge (auch wenn gerade gebremst)
     bool forward = drive.isMovingForward() || lineFollower.isActive();
     if (!forward) {
         drive.setSpeedScale(1.0f);
-        blocked = false;
+        obstacleBlocked = false;
         lineFollower.setPaused(false);
         return;
     }
@@ -429,20 +536,20 @@ void handleObstacle() {
 
     // Einmal gestoppt: erst weiter, wenn der Weg wieder über SLOW_DISTANCE_M frei ist
     // (sonst kriecht er in Ruckeln an das Hindernis heran)
-    if (d < brakeDistance || (blocked && d < SLOW_DISTANCE_M)) {
+    if (d < brakeDistance || (obstacleBlocked && d < SLOW_DISTANCE_M)) {
         drive.brake();
         lineFollower.setPaused(true);
-        if (!blocked) {
+        if (!obstacleBlocked) {
             outEvent("{\"t\":\"obstacle\",\"dist\":" + String(d, 3) + ",\"brakeAt\":" + String(brakeDistance, 3) +
                      ",\"speed\":" + String(currentSpeedMs, 2) + "}",
                      "STOPP: Hindernis bei " + String(d, 3) + " m (Bremspunkt " +
                      String(brakeDistance, 3) + " m bei " + String(currentSpeedMs, 2) + " m/s)\n");
         }
-        blocked = true;
+        obstacleBlocked = true;
         return;
     }
-    if (blocked) {
-        blocked = false;
+    if (obstacleBlocked) {
+        obstacleBlocked = false;
         lineFollower.setPaused(false);
         if (lineFollower.isActive()) out("Weg frei → Linienfolge geht weiter\n");
     }
@@ -472,7 +579,7 @@ void loop() {
 
         // Linie: L/M/R, '#' = schwarze Linie, '.' = keine Linie
         LineSensor::Reading line = lineSensor.read();
-        String msg = "Modus: ";
+        String msg = estopActive ? "NOT-HALT | Modus: " : "Modus: ";
         if (lineFollower.isActive()) {
             msg += lineFollower.isPaused() ? "Linie (Hindernis)" : (lineFollower.inGap() ? "Linie (Lücke)" : "Linie");
         } else {
@@ -492,7 +599,7 @@ void loop() {
         msg += " | Trim: " + String(drive.getTrim() * 100.0f, 1) + "%";
         msg += " || L: " + String(data.leftSpeedMs, 3) + " m/s | R: " + String(data.rightSpeedMs, 3) + " m/s\n";
 
-        const char *mode = joyActive ? "joystick" : (activeKey ? "keys" : "idle");
+        const char *mode = lineFollower.isActive() ? "line" : (joyActive ? "joystick" : (activeKey ? "keys" : "idle"));
         String json = "{\"t\":\"status\",\"ms\":" + String(millis()) +
             ",\"mode\":\"" + mode + "\"" +
             ",\"line\":[" + String(line.left) + "," + String(line.center) + "," + String(line.right) + "]" +
@@ -502,7 +609,13 @@ void loop() {
             ",\"pulses\":[" + String(tripL) + "," + String(tripR) + "]" +
             ",\"err\":" + String(drive.getPulseError(), 1) +
             ",\"trim\":" + String(drive.getTrim() * 100.0f, 1) +
-            ",\"maxSpeed\":" + String(joyMaxSpeed) + "}";
+            ",\"maxSpeed\":" + String(joyMaxSpeed) +
+            ",\"selected\":\"" + modeName() + "\"" +
+            ",\"estop\":" + (estopActive ? "true" : "false") +
+            ",\"gap\":" + (lineFollower.isActive() && lineFollower.inGap() ? "true" : "false") +
+            ",\"blocked\":" + (obstacleBlocked ? "true" : "false") +
+            ",\"lineSpeed\":" + String(lineFollower.baseSpeed, 0) +
+            ",\"lineKp\":" + String(lineFollower.kp, 2) + "}";
         outEvent(json, msg);
     }
 }
