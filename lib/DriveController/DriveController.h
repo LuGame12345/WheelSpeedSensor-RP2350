@@ -50,6 +50,21 @@ public:
     // Gelernte Korrektur verwerfen (alle Fahrtrichtungen)
     void resetTrim();
 
+    // ---- Manuelle Kalibrierung ----
+    // Fester Motor-Ausgleich statt Selbstlernen. value in Prozent, -30 … +30:
+    //   > 0 → rechter Motor wird um value % gebremst  → Roboter zieht mehr nach rechts
+    //   < 0 → linker Motor wird um |value| % gebremst → Roboter zieht mehr nach links
+    // Faustregel: zieht er nach links → Wert erhöhen, zieht er nach rechts → Wert senken.
+    // Im manuellen Modus ist die Gleichlaufregelung (Selbstlernen) aus.
+    void  setManualCalibration(float valuePercent);
+    void  setAutoCalibration();                 // zurück zum Selbstlernen (Standard)
+    bool  isManualCalibration() const { return _manual; }
+    float getManualValue() const { return _manualValue; }
+
+    // Gelernter Wert (vorwärts) in derselben Einheit wie der manuelle Wert (%),
+    // z. B. als Startwert für den Drehregler in der App
+    float getLearnedValue() const { return -_trim[0] * 100.0f; }
+
     // Diagnose
     float getTrim()       const { return _trim[_trimIndex()]; }  // gelernte Korrektur (Anteil, z. B. 0.05 = 5 %)
     float getCorrection() const { return _correction; }          // aktuell angewandte Korrektur
@@ -72,6 +87,8 @@ private:
     float _correction = 0;
     bool  _syncEnabled = true;
     float _speedScale  = 1.0f;
+    bool  _manual      = false;
+    float _manualValue = 0.0f;   // %
 
     float _kp   = 0.08f;  // Korrektur pro Puls Vorsprung (0.08 = 8 %)
     float _ki   = 0.05f;  // Lernrate des Trims pro Puls und Sekunde

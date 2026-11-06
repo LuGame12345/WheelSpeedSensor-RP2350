@@ -2,7 +2,7 @@
 
 Dieses Dokument beschreibt alles, was eine Handy-App braucht, um den Roboter per Bluetooth zu steuern (Joystick) und seine Messwerte anzuzeigen. Es ist die verbindliche Schnittstelle zwischen Firmware und App.
 
-- **Firmware-Stand:** Branch `app`, Protokollversion `2`
+- **Firmware-Stand:** Branch `kalibrierung`, Protokollversion `3`
 - **App-Konzept:** `docs/App_PS4_Controller_Konzept.pdf` (iOS-App mit PS4-Controller: Tastenbelegung, Modi, Not-Halt)
 - **Gerät:** Raspberry Pi Pico 2 W (RP2350 + Funkchip CYW43439), Arduino-Firmware mit BTstack
 
@@ -103,7 +103,7 @@ Dieses Dokument beschreibt alles, was eine Handy-App braucht, um den Roboter per
 | `$FMT,JSON` | – | Ausgaben an BLE als **JSON-Zeilen** | `{"t":"fmt","value":"JSON"}` |
 | `$FMT,TEXT` | – | Ausgaben an BLE als lesbarer Text (Standard) | Textzeile |
 | `$PING` | – | Verbindungstest | `{"t":"pong"}` |
-| `$INFO` | – | Geräteinfo | `{"t":"info","name":"Auto-Roboter","proto":2,"maxSpeed":70,"joyTimeoutMs":300,"hbTimeoutMs":1500,"selected":"manual","estop":false,"lineSpeed":40,"lineKp":0.60}` |
+| `$INFO` | – | Geräteinfo | `{"t":"info","name":"Auto-Roboter","proto":3,"maxSpeed":70,"joyTimeoutMs":300,"hbTimeoutMs":1500,"selected":"manual","estop":false,"lineSpeed":40,"lineKp":0.60}` |
 | `$MODE,MANUAL` | – | Modus Manuell (L1/R1). Hält an (ausrollen) | `{"t":"mode","value":"manual"}` |
 | `$MODE,LINE` | – | Modus Autonom/Linienfolge (L1/R1). Hält an, wartet auf `$START` | `{"t":"mode","value":"line"}` |
 | `$START` | – | **X:** Ist der Not-Halt aktiv → nur Sperre lösen (fährt nicht los). Sonst im Modus `line` → Linienfolge starten | `{"t":"estop","active":false}` bzw. `{"t":"start","mode":"line"}` / `{"t":"start","mode":"manual"}` |
@@ -112,7 +112,12 @@ Dieses Dokument beschreibt alles, was eine Handy-App braucht, um den Roboter per
 | `$LINEKP,<v>` | v: 0 … 5 (Kommazahl, z. B. `0.7`) | Lenkstärke der Linienfolge (Steuerkreuz ←/→) | `{"t":"linekp","value":0.70}` |
 | `$BIAS,<v>` | v: −20 … 20 (%) | Kurs-Trim für Geradeauslauf im Modus Manuell | `{"t":"bias","value":0.5}` |
 | `$TRIMRESET` | – | Gelernten Motor-Trim löschen (Touchpad-Klick), nur im Stand | `msg` oder `error` „nur im Stand“ |
-| `$HB` | – | **Heartbeat**, alle 500 ms senden (siehe 4.3) | – |
+| `$HB` | – | **Heartbeat**, alle 500 ms senden (siehe 4.2) | – |
+| `$CAL,AUTO` | – | Kalibrierung automatisch: Pico lernt den Motor-Ausgleich selbst (Standard) | `{"t":"cal","event":"set","mode":"auto",…}` |
+| `$CAL,MANUAL,<v>` | v: −30 … 30 (%, eine Nachkommastelle) | Fester Motor-Ausgleich aus der App, Selbstlernen aus. Gilt bis Neustart oder BLE-Trennung (siehe 4.3) | `{"t":"cal","event":"set","mode":"manual","value":2.5,"learned":1.8}` |
+| `$CAL,TEST[,<tempo>,<sek>]` | tempo 10 … 100 (Standard 30), sek 1 … 10 (Standard 5) | Testfahrt geradeaus, nur Modus Manuell, nicht bei Not-Halt | `{"t":"cal","event":"test","state":"running",…}` … `"done"` |
+| `$CAL,STOP` | – | Testfahrt abbrechen | `{"t":"cal","event":"test","state":"aborted","reason":"app"}` |
+| `$CAL,GET` | – | Aktuelle Kalibrierung abfragen | `{"t":"cal","event":"info","mode":"auto","value":0.0,"learned":1.8}` |
 
 Unbekannte Befehle → `{"t":"error","msg":"unbekannter Befehl","cmd":"…"}`.
 
@@ -127,7 +132,25 @@ Unbekannte Befehle → `{"t":"error","msg":"unbekannter Befehl","cmd":"…"}`.
 - Ohne jemals `$HB` (z. B. Test mit einem Terminal) ist der Heartbeat nicht aktiv.
 - Nach einem Verbindungsabbruch muss die App den Heartbeat wieder beginnen.
 
-### 4.3 Controller-Belegung → Befehle (aus dem App-Konzept)
+### 4.3 Kalibrierung (Motor-Ausgleich)
+
+Zwei Motoren laufen nie exakt gleich schnell, der Roboter zieht dann leicht zur Seite.
+
+- **Automatisch (Standard):** Der Pico misst über die Lichtschranken und gleicht bei jeder Fahrt selbst aus. Der gelernte Wert steht als `calLearned` (in %) in der status-Zeile.
+- **Manuell:** Die App gibt einen festen Wert vor: `$CAL,MANUAL,<v>`. Das Selbstlernen ist dann aus.
+  - `v > 0` bremst den **rechten** Motor um v % → Roboter zieht mehr nach **rechts**.
+  - `v < 0` bremst den **linken** Motor um |v| % → Roboter zieht mehr nach **links**.
+  - Faustregel: **Zieht er nach links → Wert erhöhen. Zieht er nach rechts → Wert senken.**
+  - Der Wert gilt, bis der Pico ausgeschaltet wird oder die BLE-Verbindung abreißt. Danach ist wieder **Automatisch** aktiv. Der Pico speichert nichts dauerhaft.
+- **Speichern macht die App:** Sie merkt sich den Wert und schickt ihn nach jedem Verbinden erneut mit `$CAL,MANUAL,<v>`, wenn der Nutzer „manuelle Kalibrierung verwenden“ eingeschaltet hat.
+- **Testfahrt:** `$CAL,TEST,30,5` fährt 5 s geradeaus mit 30 %. Während der Fahrt kann `$CAL,MANUAL,<v>` mehrfach gesendet werden, der neue Wert wirkt sofort (Drehregler live).
+  - Fortschritt 2× pro Sekunde: `{"t":"cal","event":"test","state":"running","speed":30,"ms":5000,"left":3500,"pulses":[120,118]}` (`left` = Restzeit in ms)
+  - Ende: `{"t":"cal","event":"test","state":"done","pulses":[201,199],"mode":"manual","value":2.5,"learned":1.8}`
+  - Abbruch: `{"t":"cal","event":"test","state":"aborted","reason":"…"}`; Gründe: `app`, `stopp`, `nothalt`, `hindernis`, `joystick`, `manuell`, `linienfolge`
+  - Abgebrochen wird durch `$CAL,STOP`, `$STOP` (Kreis), `$ESTOP` (Dreieck), Joystick-Bewegung, Hindernis, Heartbeat-Ausfall oder Verbindungsabbruch. `$J,0,0` während der Testfahrt wird ignoriert.
+  - `pulses` = Lichtschranken-Pulse links/rechts seit Start (≈ 10 mm je Puls). Bei gleichen Werten drehen beide Räder gleich weit.
+
+### 4.4 Controller-Belegung → Befehle (aus dem App-Konzept)
 
 | PS4-Taste | Befehl |
 |---|---|
@@ -144,7 +167,7 @@ Unbekannte Befehle → `{"t":"error","msg":"unbekannter Befehl","cmd":"…"}`.
 
 Aktuelle Werte für ↑/↓ und ←/→ stehen in jeder `status`-Zeile (`lineSpeed`, `lineKp`).
 
-### 4.4 Einzelzeichen-Befehle (Terminal, Tastatur, zum Testen)
+### 4.5 Einzelzeichen-Befehle (Terminal, Tastatur, zum Testen)
 
 Diese funktionieren weiterhin, z. B. für Tests mit einer Terminal-App. Für die eigene App sind die `$`-Befehle gedacht.
 
@@ -174,7 +197,7 @@ Jede JSON-Zeile hat das Feld `"t"` (Typ).
 ### 5.1 `status` – Messwerte, 5× pro Sekunde (alle 200 ms)
 
 ```json
-{"t":"status","ms":123456,"mode":"joystick","line":[0,1,0],"dist":0.153,"pwm":[45.0,45.0],"speed":[0.210,0.205],"pulses":[412,409],"err":1.0,"trim":2.5,"maxSpeed":70,"selected":"manual","estop":false,"gap":false,"blocked":false,"lineSpeed":40,"lineKp":0.60}
+{"t":"status","ms":123456,"mode":"joystick","line":[0,1,0],"dist":0.153,"pwm":[45.0,45.0],"speed":[0.210,0.205],"pulses":[412,409],"err":1.0,"trim":2.5,"maxSpeed":70,"selected":"manual","estop":false,"gap":false,"blocked":false,"lineSpeed":40,"lineKp":0.60,"cal":"auto","calValue":0.0,"calLearned":1.8,"calTest":false}
 ```
 
 | Feld | Typ | Einheit | Bedeutung |
@@ -187,6 +210,10 @@ Jede JSON-Zeile hat das Feld `"t"` (Typ).
 | `blocked` | bool | – | `true` = steht wegen eines Hindernisses (Linienfolge pausiert) |
 | `lineSpeed` | int | % | Tempo der Linienfolge |
 | `lineKp` | float | – | Lenkstärke der Linienfolge |
+| `cal` | string | – | Kalibrierung: `auto` oder `manual` |
+| `calValue` | float | % | Manueller Ausgleichswert (nur wirksam bei `cal` = `manual`) |
+| `calLearned` | float | % | Selbst gelernter Ausgleich (vorwärts), gleiche Einheit wie `calValue` – guter Startwert für den Drehregler |
+| `calTest` | bool | – | Testfahrt läuft |
 | `line` | [int, int, int] | 0/1 | Spurfolgesensor links, Mitte, rechts; `1` = schwarze Linie erkannt |
 | `dist` | float \| `null` | m | Abstand zum Hindernis vorne (Ultraschall); `null` = kein Echo (frei > 4 m oder zu nah < 3 cm) |
 | `pwm` | [float, float] | % | Aktueller Sollwert links / rechts, −100 … 100 (negativ = rückwärts), nach Hindernis-Drosselung |
@@ -301,10 +328,11 @@ Ein Schieberegler 10–100 % sendet `$SPEED,<n>\n` (nur bei Änderung, nicht dau
 5. Services entdecken → NUS → RX (`…0002`) und TX (`…0003`) holen.
 6. **Notifications auf TX aktivieren.**
 7. `$FMT,JSON\n` senden.
-8. `$INFO\n` senden → `info`-Antwort prüfen (`proto` = 2), `selected` und `estop` übernehmen (der Pico ist die Wahrheit).
+8. `$INFO\n` senden → `info`-Antwort prüfen (`proto` = 3), `selected` und `estop` übernehmen (der Pico ist die Wahrheit).
 9. Heartbeat starten: `$HB\n` alle 500 ms.
+   Falls „manuelle Kalibrierung verwenden“ in der App aktiv ist: `$CAL,MANUAL,<gespeicherter Wert>\n` senden.
 10. Ab jetzt kommen `status`-Zeilen 5×/s → UI aktualisieren.
-11. Controller nach Abschnitt 4.3 umsetzen, Joystick nach Abschnitt 6.
+11. Controller nach Abschnitt 4.4 umsetzen, Joystick nach Abschnitt 6.
 12. Bei Verbindungsverlust: UI auf „getrennt“, automatisch neu scannen/verbinden, danach wieder ab Schritt 4.
 
 ### Beispiel-Sitzung
@@ -349,5 +377,6 @@ $START         X: Not-Halt lösen bzw. Linienfolge starten
 $ESTOP         Dreieck: Not-Halt mit Sperre
 $STOP          Kreis: Aus (ausrollen)
 $LINESPEED,n   $LINEKP,v   $BIAS,v   $TRIMRESET
+$CAL,AUTO   $CAL,MANUAL,v   $CAL,TEST[,tempo,sek]   $CAL,STOP   $CAL,GET
 $BRAKE $PING $INFO
 ```

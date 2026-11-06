@@ -45,6 +45,15 @@ void DriveController::getTripPulses(uint32_t &left, uint32_t &right) const {
     right = r - _startRight;
 }
 
+void DriveController::setManualCalibration(float valuePercent) {
+    _manualValue = constrain(valuePercent, -30.0f, 30.0f);
+    _manual      = true;
+}
+
+void DriveController::setAutoCalibration() {
+    _manual = false;
+}
+
 void DriveController::resetTrim() {
     for (float &t : _trim) t = 0;
 }
@@ -60,6 +69,18 @@ void DriveController::update() {
 
     // Stillstand → nichts zu regeln (stop()/brake() haben die Motoren bereits gesetzt)
     if (a < 0.5f && b < 0.5f) return;
+
+    // Manuelle Kalibrierung: fester Ausgleich, kein Selbstlernen
+    if (_manual) {
+        _correction = 0;
+        float outL = a, outR = b;
+        float v = _manualValue / 100.0f;
+        if (v > 0) outR *= (1.0f - v);   // rechten Motor bremsen → zieht nach rechts
+        else       outL *= (1.0f + v);   // linken Motor bremsen  → zieht nach links
+        _motors.drive(copysignf(outL * _speedScale, _targetLeft),
+                      copysignf(outR * _speedScale, _targetRight));
+        return;
+    }
 
     // Steht ein Rad bewusst still, gibt es kein Verhältnis zum Regeln
     if (!_syncEnabled || a < 0.5f || b < 0.5f) {

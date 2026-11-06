@@ -88,6 +88,7 @@ void printHelp() {
     out("Linienfolge: l=start/stopp, k/K Lenk-Kp, m/M Kd, +/- Basistempo (während Linienfolge)\n");
     out("App: $J,x,y (Joystick), $STOP, $BRAKE, $SPEED,n, $FMT,JSON|TEXT, $PING, $INFO\n");
     out("App: $ESTOP, $START, $MODE,MANUAL|LINE, $LINESPEED,n, $LINEKP,v, $BIAS,v, $TRIMRESET, $HB\n");
+    out("Kalibrierung: $CAL,AUTO | $CAL,MANUAL,<wert %> | $CAL,TEST[,tempo,sek] | $CAL,STOP | $CAL,GET\n");
 }
 
 void setup() {
@@ -124,6 +125,34 @@ bool      obstacleBlocked = false;   // steht gerade wegen eines Hindernisses
 
 const char *modeName() { return robotMode == RobotMode::Line ? "line" : "manual"; }
 
+// ---------------- Kalibrierung ----------------
+//
+// Standard: AUTO – der Pico lernt den Motor-Ausgleich bei jeder Fahrt selbst.
+// "$CAL,MANUAL,<wert>" – fester Ausgleich aus der App (gilt bis Neustart oder
+//   BLE-Trennung, dann wieder AUTO). Nichts wird im Pico gespeichert.
+// "$CAL,TEST[,<tempo>,<sekunden>]" – Testfahrt geradeaus (Standard 30 %, 5 s),
+//   währenddessen kann der Wert live mit $CAL,MANUAL geändert werden.
+bool          calTestActive = false;
+unsigned long calTestStart  = 0;
+unsigned long calTestMs     = 5000;
+int           calTestSpeed  = 30;
+unsigned long calLastReport = 0;
+
+String calInfoJson(const char *event) {
+    return String("{\"t\":\"cal\",\"event\":\"") + event + "\"" +
+           ",\"mode\":\"" + (drive.isManualCalibration() ? "manual" : "auto") + "\"" +
+           ",\"value\":" + String(drive.getManualValue(), 1) +
+           ",\"learned\":" + String(drive.getLearnedValue(), 1) + "}";
+}
+
+void calAbort(const char *reason) {
+    if (!calTestActive) return;
+    calTestActive = false;
+    drive.stop();
+    outEvent(String("{\"t\":\"cal\",\"event\":\"test\",\"state\":\"aborted\",\"reason\":\"") + reason + "\"}",
+             String("Testfahrt abgebrochen: ") + reason + "\n");
+}
+
 bool          joyActive = false;  // Joystick steuert gerade (siehe unten)
 char          activeKey = 0;      // aktuell gehaltene Fahrtaste (0 = keine)
 bool          repeating = false;  // Wiederholung schon angekommen?
@@ -141,6 +170,7 @@ void applyMove(char key) {
 
 void holdKey(char key, bool fromPad = false) {
     if (estopActive) return;              // Not-Halt: keine Fahrbefehle
+    calAbort("manuell");
     if (key == activeKey) {
         repeating = true;                 // Wiederholung → weiterfahren
     } else {
@@ -156,6 +186,7 @@ void holdKey(char key, bool fromPad = false) {
 }
 
 void releaseKey() {
+    calAbort("stopp");
     activeKey = 0;
     padHeld   = false;
     joyActive = false;
@@ -189,6 +220,12 @@ void joystick(int x, int y) {
 
     // Not-Halt oder Modus Autonom: Joystick fährt nicht (R2/Stick nur im Modus Manuell)
     if (estopActive || robotMode != RobotMode::Manual) return;
+
+    // Während einer Testfahrt: Joystick in Ruhe ignorieren, Bewegung bricht den Test ab
+    if (calTestActive) {
+        if (x == 0 && y == 0) return;
+        calAbort("joystick");
+    }
 
     // Fahrtasten-Halten beenden, Joystick übernimmt
     activeKey = 0;
@@ -226,6 +263,7 @@ void checkJoystick() {
 
 // ---------------- Not-Halt / Start / Modus ----------------
 void emergencyStop() {
+    calAbort("nothalt");
     activeKey = 0;
     padHeld   = false;
     joyActive = false;
@@ -243,6 +281,7 @@ void startCommand() {
         return;
     }
     if (robotMode == RobotMode::Line) {
+        calAbort("linienfolge");
         if (!lineFollower.isActive()) lineFollower.start();
         outEvent("{\"t\":\"start\",\"mode\":\"line\"}", "Start: Linienfolge\n");
     } else {
@@ -255,6 +294,56 @@ void setMode(RobotMode m) {
     robotMode = m;
     outEvent("{\"t\":\"mode\",\"value\":\"" + String(modeName()) + "\"}",
              String("Modus: ") + (m == RobotMode::Line ? "Autonom (Linie)" : "Manuell") + "\n");
+}
+
+// ---------------- Kalibrier-Testfahrt ----------------
+void calStartTest(int speed, unsigned long ms) {
+    if (estopActive) {
+        outEvent("{\"t\":\"error\",\"msg\":\"Not-Halt aktiv\",\"cmd\":\"CAL\"}", "Testfahrt: erst Not-Halt lösen\n");
+        return;
+    }
+    if (robotMode != RobotMode::Manual) {
+        outEvent("{\"t\":\"error\",\"msg\":\"nur im Modus Manuell\",\"cmd\":\"CAL\"}", "Testfahrt nur im Modus Manuell\n");
+        return;
+    }
+    releaseKey();                          // laufende Fahrt beenden
+    calTestSpeed  = constrain(speed, 10, 100);
+    calTestMs     = constrain(ms, 1000UL, 10000UL);
+    calTestStart  = millis();
+    calLastReport = calTestStart;
+    calTestActive = true;
+    drive.drive(calTestSpeed, calTestSpeed);
+    outEvent("{\"t\":\"cal\",\"event\":\"test\",\"state\":\"running\",\"speed\":" + String(calTestSpeed) +
+             ",\"ms\":" + String(calTestMs) + ",\"left\":" + String(calTestMs) + "}",
+             "Testfahrt: " + String(calTestSpeed) + " % für " + String(calTestMs / 1000.0f, 1) + " s\n");
+}
+
+void calTestUpdate() {
+    if (!calTestActive) return;
+    if (obstacleBlocked) { calAbort("hindernis"); return; }
+
+    unsigned long elapsed = millis() - calTestStart;
+    uint32_t pl, pr;
+    drive.getTripPulses(pl, pr);
+
+    if (elapsed >= calTestMs) {
+        calTestActive = false;
+        drive.stop();
+        outEvent("{\"t\":\"cal\",\"event\":\"test\",\"state\":\"done\"" +
+                 String(",\"pulses\":[") + String(pl) + "," + String(pr) + "]" +
+                 ",\"mode\":\"" + (drive.isManualCalibration() ? "manual" : "auto") + "\"" +
+                 ",\"value\":" + String(drive.getManualValue(), 1) +
+                 ",\"learned\":" + String(drive.getLearnedValue(), 1) + "}",
+                 "Testfahrt fertig – Pulse L/R: " + String(pl) + "/" + String(pr) + "\n");
+        return;
+    }
+    if (millis() - calLastReport >= 500) {  // Fortschritt 2× pro Sekunde
+        calLastReport = millis();
+        outEvent("{\"t\":\"cal\",\"event\":\"test\",\"state\":\"running\",\"speed\":" + String(calTestSpeed) +
+                 ",\"ms\":" + String(calTestMs) + ",\"left\":" + String(calTestMs - elapsed) +
+                 ",\"pulses\":[" + String(pl) + "," + String(pr) + "]}",
+                 "Testfahrt: noch " + String((calTestMs - elapsed) / 1000.0f, 1) + " s, Pulse L/R " + String(pl) + "/" + String(pr) + "\n");
+    }
 }
 
 // ---------------- Heartbeat ----------------
@@ -346,6 +435,34 @@ void handleExtended(char *cmd) {
         drive.setBias(atof(args) / 100.0f);
         outEvent("{\"t\":\"bias\",\"value\":" + String(drive.getBias() * 100.0f, 1) + "}",
                  "Kurs-Trim: " + String(drive.getBias() * 100.0f, 1) + " %\n");
+    } else if (strcmp(cmd, "CAL") == 0 && args) {
+        // Unterbefehl und weitere Argumente trennen
+        char *a2 = strchr(args, ',');
+        if (a2) *a2++ = '\0';
+        if (strcmp(args, "MANUAL") == 0 && a2) {
+            drive.setManualCalibration(atof(a2));
+            outEvent(calInfoJson("set"), "Kalibrierung: manuell " + String(drive.getManualValue(), 1) + " %\n");
+        } else if (strcmp(args, "AUTO") == 0) {
+            drive.setAutoCalibration();
+            outEvent(calInfoJson("set"), "Kalibrierung: automatisch\n");
+        } else if (strcmp(args, "TEST") == 0) {
+            int speed = 30;
+            float sec = 5.0f;
+            if (a2) {
+                speed = atoi(a2);
+                char *a3 = strchr(a2, ',');
+                if (a3) sec = atof(a3 + 1);
+            }
+            calStartTest(speed, (unsigned long)(sec * 1000.0f));
+        } else if (strcmp(args, "STOP") == 0) {
+            calAbort("app");
+        } else if (strcmp(args, "GET") == 0) {
+            outEvent(calInfoJson("info"),
+                     String("Kalibrierung: ") + (drive.isManualCalibration() ? "manuell " : "automatisch ") +
+                     String(drive.getManualValue(), 1) + " % (gelernt " + String(drive.getLearnedValue(), 1) + " %)\n");
+        } else {
+            outEvent("{\"t\":\"error\",\"msg\":\"unbekannter Befehl\",\"cmd\":\"CAL\"}", "Unbekannter $CAL-Befehl\n");
+        }
     } else if (strcmp(cmd, "TRIMRESET") == 0) {
         if (joyActive || activeKey || lineFollower.isActive()) {
             outEvent("{\"t\":\"error\",\"msg\":\"nur im Stand\",\"cmd\":\"TRIMRESET\"}",
@@ -365,7 +482,7 @@ void handleExtended(char *cmd) {
     } else if (strcmp(cmd, "PING") == 0) {
         outEvent("{\"t\":\"pong\"}", "PONG\n");
     } else if (strcmp(cmd, "INFO") == 0) {
-        outEvent("{\"t\":\"info\",\"name\":\"" + String(BLE_NAME) + "\",\"proto\":2"
+        outEvent("{\"t\":\"info\",\"name\":\"" + String(BLE_NAME) + "\",\"proto\":3"
                  ",\"maxSpeed\":" + String(joyMaxSpeed) +
                  ",\"joyTimeoutMs\":" + String(JOY_TIMEOUT_MS) +
                  ",\"hbTimeoutMs\":" + String(HB_TIMEOUT_MS) +
@@ -373,7 +490,7 @@ void handleExtended(char *cmd) {
                  ",\"estop\":" + (estopActive ? "true" : "false") +
                  ",\"lineSpeed\":" + String(lineFollower.baseSpeed, 0) +
                  ",\"lineKp\":" + String(lineFollower.kp, 2) + "}",
-                 "Info: " + String(BLE_NAME) + ", Protokoll 2, Joystick-Tempo " + String(joyMaxSpeed) + " %\n");
+                 "Info: " + String(BLE_NAME) + ", Protokoll 3, Joystick-Tempo " + String(joyMaxSpeed) + " %\n");
     } else {
         outEvent("{\"t\":\"error\",\"msg\":\"unbekannter Befehl\",\"cmd\":\"" + jsonEscape(cmd) + "\"}",
                  "Unbekannter Befehl: $" + String(cmd) + "\n");
@@ -496,6 +613,7 @@ void handleCommands() {
         if (!estopActive) releaseKey();  // bei Not-Halt bleibt die Bremse an
         bleJson = false;                 // nächste Verbindung startet wieder im Textformat
         hbSeen  = false;
+        drive.setAutoCalibration();      // manuelle Kalibrierung gilt nur pro Verbindung
         Serial.println("BLE getrennt → Motoren gestoppt");
     }
     wasConnected = connected;
@@ -568,6 +686,7 @@ void loop() {
     handleCommands();
     sonar.update();
     handleObstacle();
+    calTestUpdate();
     lineFollower.update();
     drive.update();
 
@@ -615,7 +734,11 @@ void loop() {
             ",\"gap\":" + (lineFollower.isActive() && lineFollower.inGap() ? "true" : "false") +
             ",\"blocked\":" + (obstacleBlocked ? "true" : "false") +
             ",\"lineSpeed\":" + String(lineFollower.baseSpeed, 0) +
-            ",\"lineKp\":" + String(lineFollower.kp, 2) + "}";
+            ",\"lineKp\":" + String(lineFollower.kp, 2) +
+            ",\"cal\":\"" + (drive.isManualCalibration() ? "manual" : "auto") + "\"" +
+            ",\"calValue\":" + String(drive.getManualValue(), 1) +
+            ",\"calLearned\":" + String(drive.getLearnedValue(), 1) +
+            ",\"calTest\":" + (calTestActive ? "true" : "false") + "}";
         outEvent(json, msg);
     }
 }
